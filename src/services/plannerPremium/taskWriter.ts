@@ -2,7 +2,7 @@ import type { PoTask } from '../../models/projectOnline.types'
 import type { MappingConfiguration, OptionSetMapping } from '../../models/mapping.types'
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords } from './dataverseClient'
-import { cleanGuid, getRecordId, nowError } from './importHelpers'
+import { chunks, cleanGuid, getRecordId, nowError } from './importHelpers'
 import { createOperationSet, executeOperationSet, queueScheduleCreate, queueScheduleDelete } from './scheduleApi'
 
 export interface TaskWriteResult {
@@ -120,12 +120,6 @@ function compareTasks(a: PoTask, b: PoTask) {
   const ao = a.TaskOutlineNumber ?? ''
   const bo = b.TaskOutlineNumber ?? ''
   return ao.localeCompare(bo, undefined, { numeric: true }) || a.TaskName.localeCompare(b.TaskName)
-}
-
-function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
 }
 
 async function findDefaultBucket(projectId: string): Promise<string | undefined> {

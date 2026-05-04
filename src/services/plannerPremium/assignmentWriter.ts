@@ -1,7 +1,7 @@
 import type { PoAssignment, PoProjectTeamMember } from '../../models/projectOnline.types'
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords, performUnboundAction } from './dataverseClient'
-import { cleanGuid, getRecordId, nowError } from './importHelpers'
+import { chunks, cleanGuid, getRecordId, nowError } from './importHelpers'
 import { createOperationSet, executeOperationSet, queueScheduleCreate } from './scheduleApi'
 
 export interface AssignmentWriteResult {
@@ -111,17 +111,17 @@ export async function writeAssignments(
         const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${resourceUid}`
         const taskId = taskIdMap[assignment.TaskId]
         const teamMemberId = teamMemberIdMap[`${assignment.ProjectId}:${resourceUid}`]
-        const exists = existingRows.some(row =>
+        const existingRow = existingRows.find(row =>
           String(row['_msdyn_taskid_value']).toLowerCase() === String(taskId).toLowerCase() &&
           String(row['_msdyn_projectteamid_value']).toLowerCase() === String(teamMemberId).toLowerCase()
         )
 
-        if (!taskId || !teamMemberId || exists) {
+        if (!taskId || !teamMemberId || existingRow) {
           const result = {
             poAssignmentId: sourceId,
-            dvAssignmentId: exists ? cleanGuid(getRecordId(existingRows[0] ?? {}, 'msdyn_resourceassignmentid')) : undefined,
-            success: !!exists,
-            error: exists ? undefined : nowError('Assignment', sourceId, 'Task or project team member was not imported'),
+            dvAssignmentId: existingRow ? cleanGuid(getRecordId(existingRow, 'msdyn_resourceassignmentid')) : undefined,
+            success: !!existingRow,
+            error: existingRow ? undefined : nowError('Assignment', sourceId, 'Task or project team member was not imported'),
           }
           results.push(result)
           onProgress?.(result)
@@ -196,8 +196,3 @@ function groupAssignmentsByProject(assignments: PoAssignment[]): Map<string, PoA
   return grouped
 }
 
-function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
-}

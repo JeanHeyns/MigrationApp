@@ -58,7 +58,7 @@ function csvEscape(value: unknown): string {
 
 function downloadCsv(filename: string, rows: string[][]) {
   const csv = rows.map(row => row.map(csvEscape).join(',')).join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -76,7 +76,7 @@ function flattenErrors(errors: ImportError[]): string[][] {
 
 export function Step5Report() {
   const styles = useStyles()
-  const { importResults, prevStep, setCurrentStep } = useMigration()
+  const { importResults, prevStep, setCurrentStep, clearImportResults, clearLogs } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
   const totalSucceeded = importResults.reduce((s, r) => s + r.succeeded, 0)
@@ -205,7 +205,7 @@ export function Step5Report() {
 
       <div className={styles.footer}>
         <Button onClick={prevStep}>Back to Import</Button>
-        <Button onClick={() => setCurrentStep(1)}>Start New Migration</Button>
+        <Button onClick={() => { clearImportResults(); clearLogs(); setCurrentStep(1) }}>Start New Migration</Button>
       </div>
     </div>
   )

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import {
   Button,
   Checkbox,
@@ -70,20 +70,30 @@ export function Step4Import() {
   const [total, setTotal] = useState(0)
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
+  const logRef = useRef<HTMLDivElement>(null)
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
     [fetchedData?.projects, selectedProjectIds],
   )
   const selectedProjectIdLookup = useMemo(() => new Set(selectedProjects.map(p => p.ProjectId)), [selectedProjects])
-  const selectedTasks = fetchedData?.tasks.filter(t =>
-    selectedProjectIdLookup.has(t.ProjectId) &&
-    t.TaskId !== '0' &&
-    t.TaskOutlineNumber !== '0' &&
-    t.TaskOutlineLevel !== 0
-  ) ?? []
-  const selectedTeamMembers = fetchedData?.teamMembers.filter(tm => selectedProjectIdLookup.has(tm.ProjectId)) ?? []
-  const selectedAssignments = fetchedData?.assignments.filter(a => selectedProjectIdLookup.has(a.ProjectId)) ?? []
+  const selectedTasks = useMemo(() =>
+    fetchedData?.tasks.filter(t =>
+      selectedProjectIdLookup.has(t.ProjectId) &&
+      t.TaskId !== '0' &&
+      t.TaskOutlineNumber !== '0' &&
+      t.TaskOutlineLevel !== 0
+    ) ?? [],
+    [fetchedData?.tasks, selectedProjectIdLookup],
+  )
+  const selectedTeamMembers = useMemo(() =>
+    fetchedData?.teamMembers.filter(tm => selectedProjectIdLookup.has(tm.ProjectId)) ?? [],
+    [fetchedData?.teamMembers, selectedProjectIdLookup],
+  )
+  const selectedAssignments = useMemo(() =>
+    fetchedData?.assignments.filter(a => selectedProjectIdLookup.has(a.ProjectId)) ?? [],
+    [fetchedData?.assignments, selectedProjectIdLookup],
+  )
 
   if (!fetchedData || !mappingConfig) {
     return (
@@ -100,6 +110,9 @@ export function Step4Import() {
 
   function appendLog(message: string) {
     setLogLines(prev => [...prev, `${new Date().toLocaleTimeString()}  ${message}`])
+    requestAnimationFrame(() => {
+      if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+    })
   }
 
   function toggleProject(projectId: string, checked: boolean) {
@@ -269,7 +282,7 @@ export function Step4Import() {
         </div>
         <ProgressBar value={total > 0 ? completed / total : 0} />
         {logLines.length > 0 && (
-          <div className={styles.log}>
+          <div className={styles.log} ref={logRef}>
             {logLines.map((line, idx) => <div key={idx}>{line}</div>)}
           </div>
         )}
