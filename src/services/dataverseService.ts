@@ -236,6 +236,7 @@ export interface DvEntityDefinition {
   logicalName: string
   logicalCollectionName: string
   displayName: string
+  metadataId?: string
 }
 
 export async function fetchEntityDefinitions(): Promise<DvEntityDefinition[]> {
@@ -243,7 +244,7 @@ export async function fetchEntityDefinitions(): Promise<DvEntityDefinition[]> {
   const params: Record<string, any> = {
     organization: ORG_URL,
     accept: 'application/json',
-    '$select': 'LogicalName,LogicalCollectionName,DisplayName,IsCustomEntity',
+    '$select': 'LogicalName,LogicalCollectionName,DisplayName,IsCustomEntity,MetadataId',
   }
 
   const res = await client.executeAsync<typeof params, Record<string, unknown>>({
@@ -263,9 +264,20 @@ export async function fetchEntityDefinitions(): Promise<DvEntityDefinition[]> {
       logicalName:           (e.LogicalName ?? '') as string,
       logicalCollectionName: (e.LogicalCollectionName ?? `${e.LogicalName}s`) as string,
       displayName:           (e.DisplayName?.UserLocalizedLabel?.Label ?? e.LogicalName ?? '') as string,
+      metadataId:            (e.MetadataId ?? '') as string,
     }))
     .filter(e => e.logicalName)
     .sort((a, b) => a.displayName.localeCompare(b.displayName))
+}
+
+export async function fetchSolutionEntityIds(solutionId: string): Promise<Set<string>> {
+  const rows = await listRecords(
+    'solutioncomponents',
+    'objectid',
+    `_solutionid_value eq ${solutionId} and componenttype eq 1`,
+    5000,
+  )
+  return new Set(rows.map(r => String(r['objectid'] ?? '').toLowerCase().replace(/[{}]/g, '')))
 }
 
 export interface DvEntityAttribute {

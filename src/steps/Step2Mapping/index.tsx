@@ -12,7 +12,7 @@ import {
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
-import { fetchEntityAttributes, fetchEntityDefinitions, type DvEntityAttribute, type DvEntityDefinition } from '../../services/dataverseService'
+import { fetchEntityAttributes, fetchEntityDefinitions, fetchSolutionEntityIds, type DvEntityAttribute, type DvEntityDefinition } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
 import type { PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
@@ -199,6 +199,11 @@ const useStyles = makeStyles({
     textDecoration: 'underline',
     textUnderlineOffset: '2px',
   },
+  selectFixed: {
+    width: '190px',
+    maxWidth: '190px',
+    overflow: 'hidden',
+  },
   ownerTable: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
   ownerRow: { borderBottom: `1px solid ${tokens.colorNeutralStroke2}` },
   matchBadge: {
@@ -229,6 +234,7 @@ export function Step2Mapping() {
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
+  const [solutionEntityIds, setSolutionEntityIds] = useState<Set<string>>(new Set())
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [userLoadError, setUserLoadError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -257,8 +263,16 @@ export function Step2Mapping() {
   useEffect(() => {
     fetchEntityDefinitions()
       .then(setDvEntities)
-      .catch(() => { /* non-fatal — user can type manually if needed */ })
+      .catch(() => { /* non-fatal */ })
   }, [])
+
+  // Load entity IDs in the selected solution so the table picker can be filtered
+  useEffect(() => {
+    if (!selectedSolution?.solutionid) return
+    fetchSolutionEntityIds(selectedSolution.solutionid)
+      .then(setSolutionEntityIds)
+      .catch(() => { /* non-fatal — fall back to unfiltered list */ })
+  }, [selectedSolution?.solutionid])
 
   // Load Dataverse system users and owner resources for owner matching
   useEffect(() => {
@@ -568,26 +582,32 @@ export function Step2Mapping() {
                           ? <>
                               <Select
                                 size="small"
+                                className={styles.selectFixed}
                                 value={m.targetColumnType}
+                                title={DV_TYPE_LABELS[m.targetColumnType]}
                                 onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
                               >
                                 {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
-                                  <option key={t} value={t}>{DV_TYPE_LABELS[t]}</option>
+                                  <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
                                 ))}
                               </Select>
                               {m.targetColumnType === 'Lookup' && (
                                 <Select
                                   size="small"
+                                  className={styles.selectFixed}
                                   value={m.relatedEntity?.logicalName ?? ''}
+                                  title={dvEntities.find(e => e.logicalName === m.relatedEntity?.logicalName)?.displayName ?? ''}
                                   onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
-                                  style={{ marginTop: '6px', minWidth: '180px' }}
+                                  style={{ marginTop: '6px' }}
                                 >
                                   <option value="">— pick related table —</option>
-                                  {dvEntities.map(e => (
-                                    <option key={e.logicalName} value={e.logicalName}>
-                                      {e.displayName} ({e.logicalName})
-                                    </option>
-                                  ))}
+                                  {dvEntities
+                                    .filter(e => !solutionEntityIds.size || solutionEntityIds.has((e.metadataId ?? '').toLowerCase().replace(/[{}]/g, '')))
+                                    .map(e => (
+                                      <option key={e.logicalName} value={e.logicalName} title={`${e.displayName} (${e.logicalName})`}>
+                                        {e.displayName} ({e.logicalName})
+                                      </option>
+                                    ))}
                                 </Select>
                               )}
                               {m.targetColumnType !== 'Lookup' && m.lookupTable && (
@@ -598,18 +618,19 @@ export function Step2Mapping() {
                             </>
                           : <Select
                               size="small"
+                              className={styles.selectFixed}
                               value={m.useExistingField ? m.targetLogicalName : ''}
+                              title={dvAttributes.find(a => a.logicalName === m.targetLogicalName)?.displayName ?? ''}
                               onChange={(_, d) => {
                                 const attr = dvAttributes.find(a => a.logicalName === d.value)
                                 setFieldExistingMapping(idx, d.value, attr?.attributeType ?? '')
                               }}
-                              style={{ minWidth: '200px' }}
                             >
                               <option value="">— select existing field —</option>
                               {dvAttributes
                                 .filter(a => PO_COMPATIBLE_ATTR_TYPES[m.customField.CustomFieldType]?.includes(a.attributeType))
                                 .map(a => (
-                                  <option key={a.logicalName} value={a.logicalName}>
+                                  <option key={a.logicalName} value={a.logicalName} title={`${a.displayName} (${a.logicalName})`}>
                                     {a.displayName} ({a.logicalName})
                                   </option>
                                 ))
