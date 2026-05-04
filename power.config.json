@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "appId": "b97a326f-a785-4fa5-b2b8-02a553443c09",
+  "appDisplayName": "Project Online Migratietool",
+  "region": "prod",
+  "environmentId": "c6edcc15-13d9-ee59-b036-111a0b273446",
+  "description": "Migreer projecten van Project Online naar Project for the Web",
+  "buildPath": "dist",
+  "buildEntryPoint": "index.html",
+  "localAppUrl": "http://localhost:5173",
+  "logoPath": "Default",
+  "connectionReferences": {
+    "commondataserviceforapps": {
+      "id": "/providers/Microsoft.PowerApps/apis/shared_commondataserviceforapps",
+      "displayName": "Microsoft Dataverse",
+      "dataSources": [
+        "commondataserviceforapps"
+      ],
+      "dataSets": {}
+    },
+    "projectonline": {
+      "id": "/providers/Microsoft.PowerApps/apis/shared_projectonline",
+      "displayName": "Project Online",
+      "dataSources": [
+        "projectonline"
+      ],
+      "dataSets": {}
+    },
+    "sharepointonline": {
+      "id": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+      "displayName": "SharePoint",
+      "dataSources": [
+        "sharepointonline"
+      ],
+      "dataSets": {}
+    }
+  },
+  "databaseReferences": {}
+}
