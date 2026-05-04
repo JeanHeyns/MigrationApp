@@ -246,13 +246,14 @@ export async function fetchEntityAttributes(entityLogicalName: string): Promise<
     organization: ORG_URL,
     accept: 'application/json',
     entityLogicalName,
-    '$select': 'LogicalName,DisplayName,AttributeType',
+    '$select': 'LogicalName',
+    '$expand': 'Attributes($select=LogicalName,DisplayName,AttributeType)',
   }
 
   const res = await client.executeAsync<typeof params, Record<string, unknown>>({
     connectorOperation: {
       tableName: 'commondataserviceforapps',
-      operationName: 'GetEntityAttributes',
+      operationName: 'GetEntityDefinition',
       parameters: params,
     },
   })
@@ -260,7 +261,7 @@ export async function fetchEntityAttributes(entityLogicalName: string): Promise<
   if (!res.success) throw new Error(extractDvError(res))
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw = res.data as any
-  const items = ((raw?.value ?? raw?.d?.results ?? []) as any[])
+  const items = ((raw?.Attributes ?? raw?.attributes ?? raw?.value ?? []) as any[])
   return items
     .map(a => ({
       logicalName: (a.LogicalName ?? a.logicalname ?? '') as string,
