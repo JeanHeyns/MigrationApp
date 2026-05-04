@@ -69,6 +69,7 @@ export function Step4Import() {
   const [completed, setCompleted] = useState(0)
   const [total, setTotal] = useState(0)
   const [fatalError, setFatalError] = useState<string | null>(null)
+  const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
@@ -206,6 +207,19 @@ export function Step4Import() {
         </MessageBar>
       )}
 
+      <MessageBar intent="warning">
+        <MessageBarBody>
+          Import rebuilds the schedule for every selected project. Existing tasks, dependencies, and assignments are cleared before tasks are imported again.
+        </MessageBarBody>
+      </MessageBar>
+
+      <Checkbox
+        checked={confirmScheduleRebuild}
+        disabled={running}
+        label="I understand selected project schedules will be cleared and rebuilt"
+        onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
+      />
+
       <div className={styles.toolbar}>
         <Button size="small" disabled={running} onClick={() => setSelectedProjectIds(new Set(data.projects.map(p => p.ProjectId)))}>
           Select all
@@ -264,7 +278,7 @@ export function Step4Import() {
       <div className={styles.footer}>
         <Button onClick={prevStep} disabled={running}>Back</Button>
         <div className={styles.toolbar}>
-          <Button appearance="primary" onClick={runImport} disabled={running || selectedProjects.length === 0}>
+          <Button appearance="primary" onClick={runImport} disabled={running || selectedProjects.length === 0 || !confirmScheduleRebuild}>
             {running ? 'Importing...' : 'Start Import'}
           </Button>
           <Button onClick={nextStep} disabled={running || phase !== 'Done'}>Next: Validation Report</Button>
