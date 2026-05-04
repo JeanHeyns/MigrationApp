@@ -148,7 +148,7 @@ function buildOwnerMappings(
 const useStyles = makeStyles({
   root: {
     padding: '32px',
-    maxWidth: '1100px',
+    maxWidth: '900px',
     margin: '0 auto',
     display: 'flex',
     flexDirection: 'column',
@@ -186,6 +186,18 @@ const useStyles = makeStyles({
     fontSize: '11px',
     color: tokens.colorNeutralForeground3,
     fontFamily: 'Consolas, monospace',
+  },
+  fieldNameCell: { display: 'flex', flexDirection: 'column', gap: '3px' },
+  fieldNameBadgeRow: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' },
+  modeToggle: { display: 'flex', gap: '10px', marginBottom: '6px' },
+  modeLink: {
+    fontSize: '12px',
+    cursor: 'pointer',
+    border: 'none',
+    background: 'none',
+    padding: '0',
+    textDecoration: 'underline',
+    textUnderlineOffset: '2px',
   },
   ownerTable: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
   ownerRow: { borderBottom: `1px solid ${tokens.colorNeutralStroke2}` },
@@ -305,7 +317,6 @@ export function Step2Mapping() {
     setFieldMappings(prev => prev.map((m, i) => {
       if (i !== idx) return m
       if (!logicalName) {
-        // Revert to auto-generated new column
         return {
           ...m,
           targetLogicalName: toLogicalName(m.customField.CustomFieldName, prefix),
@@ -323,6 +334,20 @@ export function Step2Mapping() {
     }))
   }
 
+  function setFieldUseExisting(idx: number, useExisting: boolean) {
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      if (!useExisting) {
+        return {
+          ...m,
+          targetLogicalName: toLogicalName(m.customField.CustomFieldName, prefix),
+          targetColumnType: SUGGESTED_DV_TYPE[m.customField.CustomFieldType],
+          useExistingField: false,
+        }
+      }
+      return { ...m, useExistingField: true }
+    }))
+  }
 
   // ── Owner mapping handlers ────────────────────────────────────────────────
 
@@ -466,79 +491,136 @@ export function Step2Mapping() {
         <table className={styles.table}>
           <thead>
             <tr>
-              <th className={styles.th} style={{ width: '32px' }}>Skip</th>
+              <th className={styles.th} style={{ width: '40px' }}>Skip</th>
               <th className={styles.th}>Field Name</th>
-              <th className={styles.th}>Entity</th>
-              <th className={styles.th}>PO Type</th>
-              <th className={styles.th}>Dataverse Column Type</th>
-              <th className={styles.th}>Lookup / Notes</th>
-              <th className={styles.th} style={{ width: '80px' }}>Migrate value</th>
-              <th className={styles.th}>Map to existing DV field</th>
+              <th className={styles.th} style={{ whiteSpace: 'nowrap' }}>PO Type</th>
+              <th className={styles.th}>Dataverse Target</th>
+              <th className={styles.th} style={{ width: '88px', textAlign: 'center' }}>Migrate value</th>
             </tr>
           </thead>
           <tbody>
             {fieldMappings.length === 0 && (
               <tr>
-                <td className={styles.td} colSpan={6} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
+                <td className={styles.td} colSpan={5} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
                   No custom fields found in Project Online.
                 </td>
               </tr>
             )}
             {fieldMappings.map((m, idx) => (
               <tr key={m.customField.CustomFieldId} className={m.skip ? styles.trSkipped : undefined}>
+
+                {/* Col 1: Skip */}
                 <td className={styles.td}>
                   <Checkbox checked={m.skip} onChange={(_, d) => setFieldSkip(idx, !!d.checked)} />
                 </td>
+
+                {/* Col 2: Field Name + entity badge + logical name */}
                 <td className={styles.td}>
-                  <div>{m.customField.CustomFieldName}</div>
-                  <div className={styles.logicalName}>{m.targetLogicalName}</div>
-                </td>
-                <td className={styles.td}>
-                  <span
-                    className={styles.entityBadge}
-                    style={{ background: ENTITY_COLORS[m.customField.CustomFieldEntityType] ?? '#888' }}
-                  >
-                    {m.customField.CustomFieldEntityType}
-                  </span>
-                </td>
-                <td className={styles.td}>{m.customField.CustomFieldType}</td>
-                <td className={styles.td}>
-                  <Select
-                    size="small"
-                    value={m.targetColumnType}
-                    onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
-                    disabled={m.skip}
-                  >
-                    {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
-                      <option key={t} value={t}>{DV_TYPE_LABELS[t]}</option>
-                    ))}
-                  </Select>
-                </td>
-                <td className={styles.td}>
-                  {!m.skip && !m.useExistingField && m.targetColumnType === 'Lookup'
-                    ? <Select
-                        size="small"
-                        value={m.relatedEntity?.logicalName ?? ''}
-                        onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
-                        style={{ minWidth: '160px' }}
+                  <div className={styles.fieldNameCell}>
+                    <div className={styles.fieldNameBadgeRow}>
+                      <strong style={{ fontSize: '13px' }}>{m.customField.CustomFieldName}</strong>
+                      <span
+                        className={styles.entityBadge}
+                        style={{ background: ENTITY_COLORS[m.customField.CustomFieldEntityType] ?? '#888' }}
                       >
-                        <option value="">— pick related table —</option>
-                        {dvEntities.map(e => (
-                          <option key={e.logicalName} value={e.logicalName}>
-                            {e.displayName} ({e.logicalName})
-                          </option>
-                        ))}
-                      </Select>
-                    : m.lookupTable
-                      ? <span style={{ fontSize: '12px' }}>
-                          {m.lookupTable.LookupTableName}<br />
-                          <span style={{ color: tokens.colorNeutralForeground3 }}>
-                            {m.lookupTable.entries.length} entries
-                          </span>
-                        </span>
-                      : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                        {m.customField.CustomFieldEntityType}
+                      </span>
+                    </div>
+                    <span className={styles.logicalName}>{m.targetLogicalName}</span>
+                  </div>
+                </td>
+
+                {/* Col 3: PO Type */}
+                <td className={styles.td} style={{ whiteSpace: 'nowrap', color: tokens.colorNeutralForeground2 }}>
+                  {m.customField.CustomFieldType}
+                </td>
+
+                {/* Col 4: Dataverse Target — mode toggle + conditional selector */}
+                <td className={styles.td}>
+                  {m.skip
+                    ? <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                    : <>
+                        <div className={styles.modeToggle}>
+                          <button
+                            className={styles.modeLink}
+                            disabled={!m.useExistingField}
+                            style={{
+                              color: !m.useExistingField ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground3,
+                              fontWeight: !m.useExistingField ? '600' : '400',
+                            }}
+                            onClick={() => setFieldUseExisting(idx, false)}
+                          >
+                            New column
+                          </button>
+                          <button
+                            className={styles.modeLink}
+                            disabled={m.useExistingField}
+                            style={{
+                              color: m.useExistingField ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground3,
+                              fontWeight: m.useExistingField ? '600' : '400',
+                            }}
+                            onClick={() => setFieldUseExisting(idx, true)}
+                          >
+                            Use existing
+                          </button>
+                        </div>
+                        {!m.useExistingField
+                          ? <>
+                              <Select
+                                size="small"
+                                value={m.targetColumnType}
+                                onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
+                              >
+                                {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
+                                  <option key={t} value={t}>{DV_TYPE_LABELS[t]}</option>
+                                ))}
+                              </Select>
+                              {m.targetColumnType === 'Lookup' && (
+                                <Select
+                                  size="small"
+                                  value={m.relatedEntity?.logicalName ?? ''}
+                                  onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
+                                  style={{ marginTop: '6px', minWidth: '180px' }}
+                                >
+                                  <option value="">— pick related table —</option>
+                                  {dvEntities.map(e => (
+                                    <option key={e.logicalName} value={e.logicalName}>
+                                      {e.displayName} ({e.logicalName})
+                                    </option>
+                                  ))}
+                                </Select>
+                              )}
+                              {m.targetColumnType !== 'Lookup' && m.lookupTable && (
+                                <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                                  {m.lookupTable.LookupTableName} · {m.lookupTable.entries.length} entries
+                                </div>
+                              )}
+                            </>
+                          : <Select
+                              size="small"
+                              value={m.useExistingField ? m.targetLogicalName : ''}
+                              onChange={(_, d) => {
+                                const attr = dvAttributes.find(a => a.logicalName === d.value)
+                                setFieldExistingMapping(idx, d.value, attr?.attributeType ?? '')
+                              }}
+                              style={{ minWidth: '200px' }}
+                            >
+                              <option value="">— select existing field —</option>
+                              {dvAttributes
+                                .filter(a => PO_COMPATIBLE_ATTR_TYPES[m.customField.CustomFieldType]?.includes(a.attributeType))
+                                .map(a => (
+                                  <option key={a.logicalName} value={a.logicalName}>
+                                    {a.displayName} ({a.logicalName})
+                                  </option>
+                                ))
+                              }
+                            </Select>
+                        }
+                      </>
                   }
                 </td>
+
+                {/* Col 5: Migrate value */}
                 <td className={styles.td} style={{ textAlign: 'center' }}>
                   <Checkbox
                     checked={m.migrateValue}
@@ -546,29 +628,7 @@ export function Step2Mapping() {
                     onChange={(_, d) => setFieldMigrateValue(idx, !!d.checked)}
                   />
                 </td>
-                <td className={styles.td}>
-                  {!m.skip
-                    ? <Select
-                        size="small"
-                        value={m.useExistingField ? m.targetLogicalName : ''}
-                        onChange={(_, d) => {
-                          const attr = dvAttributes.find(a => a.logicalName === d.value)
-                          setFieldExistingMapping(idx, d.value, attr?.attributeType ?? '')
-                        }}
-                      >
-                        <option value="">— create new column —</option>
-                        {dvAttributes
-                          .filter(a => PO_COMPATIBLE_ATTR_TYPES[m.customField.CustomFieldType]?.includes(a.attributeType))
-                          .map(a => (
-                            <option key={a.logicalName} value={a.logicalName}>
-                              {a.displayName} ({a.logicalName})
-                            </option>
-                          ))
-                        }
-                      </Select>
-                    : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
-                  }
-                </td>
+
               </tr>
             ))}
           </tbody>
