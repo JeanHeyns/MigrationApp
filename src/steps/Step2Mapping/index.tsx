@@ -12,6 +12,7 @@ import {
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
+import { fetchEntityAttributes, type DvEntityAttribute } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
 import type { PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
@@ -19,6 +20,33 @@ import type { DataverseColumnType, FieldMapping, MappingConfiguration, OwnerMapp
 import type { DvSystemUser } from '../../models/plannerPremium.types'
 
 // ─── Type mappings ────────────────────────────────────────────────────────────
+
+const DV_ATTR_TYPE_MAP: Record<string, DataverseColumnType> = {
+  String:               'Text',
+  Memo:                 'Memo',
+  Integer:              'Integer',
+  BigInt:               'Integer',
+  Decimal:              'Decimal',
+  Double:               'Decimal',
+  Money:                'Currency',
+  DateTime:             'DateTime',
+  Boolean:              'Boolean',
+  Picklist:             'OptionSet',
+  MultiSelectPicklist:  'MultiSelectOptionSet',
+  Lookup:               'Lookup',
+  Owner:                'Lookup',
+}
+
+const PO_COMPATIBLE_ATTR_TYPES: Record<PoCustomFieldType, string[]> = {
+  Text:        ['String', 'Memo'],
+  Number:      ['Integer', 'Decimal', 'Double', 'Money'],
+  Cost:        ['Money', 'Decimal'],
+  Duration:    ['Integer', 'Decimal'],
+  Date:        ['DateTime'],
+  Flag:        ['Boolean'],
+  Lookup:      ['Picklist', 'String'],
+  LookupMulti: ['MultiSelectPicklist'],
+}
 
 const SUGGESTED_DV_TYPE: Record<PoCustomFieldType, DataverseColumnType> = {
   Text:        'Text',
@@ -75,6 +103,7 @@ function buildInitialMappings(data: PoFetchedData, prefix: string): FieldMapping
       : undefined,
     skip: cf.CustomFieldEntityType === 'Resource',
     migrateValue: cf.CustomFieldEntityType === 'Project',
+    useExistingField: false,
   }))
 }
 
@@ -185,6 +214,7 @@ export function Step2Mapping() {
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>([])
   const [ownerMappings, setOwnerMappings] = useState<OwnerMapping[]>([])
   const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
+  const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [userLoadError, setUserLoadError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -201,6 +231,13 @@ export function Step2Mapping() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchedData, mappingConfig, prefix])
+
+  // Load existing msdyn_project attributes for "map to existing field" dropdown
+  useEffect(() => {
+    fetchEntityAttributes('msdyn_project')
+      .then(attrs => setDvAttributes(attrs.sort((a, b) => a.displayName.localeCompare(b.displayName))))
+      .catch(() => { /* non-fatal — dropdown stays empty */ })
+  }, [])
 
   // Load Dataverse system users and owner resources for owner matching
   useEffect(() => {
@@ -247,9 +284,28 @@ export function Step2Mapping() {
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, migrateValue } : m))
   }
 
-  function setFieldDefault(idx: number, value: string) {
-    setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, manualDefault: value || undefined } : m))
+  function setFieldExistingMapping(idx: number, logicalName: string, attrType: string) {
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      if (!logicalName) {
+        // Revert to auto-generated new column
+        return {
+          ...m,
+          targetLogicalName: toLogicalName(m.customField.CustomFieldName, prefix),
+          targetColumnType: SUGGESTED_DV_TYPE[m.customField.CustomFieldType],
+          useExistingField: false,
+        }
+      }
+      return {
+        ...m,
+        targetLogicalName: logicalName,
+        targetColumnType: DV_ATTR_TYPE_MAP[attrType] ?? m.targetColumnType,
+        useExistingField: true,
+        migrateValue: true,
+      }
+    }))
   }
+
 
   // ── Owner mapping handlers ────────────────────────────────────────────────
 
@@ -395,7 +451,7 @@ export function Step2Mapping() {
               <th className={styles.th}>Dataverse Column Type</th>
               <th className={styles.th}>Lookup / Notes</th>
               <th className={styles.th} style={{ width: '80px' }}>Migrate value</th>
-              <th className={styles.th}>Default if not mapped</th>
+              <th className={styles.th}>Map to existing DV field</th>
             </tr>
           </thead>
           <tbody>
@@ -455,18 +511,24 @@ export function Step2Mapping() {
                   />
                 </td>
                 <td className={styles.td}>
-                  {!m.skip && m.lookupTable && (m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet')
+                  {!m.skip
                     ? <Select
                         size="small"
-                        value={m.manualDefault ?? ''}
-                        onChange={(_, d) => setFieldDefault(idx, d.value)}
+                        value={m.useExistingField ? m.targetLogicalName : ''}
+                        onChange={(_, d) => {
+                          const attr = dvAttributes.find(a => a.logicalName === d.value)
+                          setFieldExistingMapping(idx, d.value, attr?.attributeType ?? '')
+                        }}
                       >
-                        <option value="">— skip if not found —</option>
-                        {m.lookupTable.entries.map(e => (
-                          <option key={e.LookupEntryUID} value={e.LookupEntryUID}>
-                            {e.LookupEntryFullValue || e.LookupEntryValue || e.LookupEntryUID}
-                          </option>
-                        ))}
+                        <option value="">— create new column —</option>
+                        {dvAttributes
+                          .filter(a => PO_COMPATIBLE_ATTR_TYPES[m.customField.CustomFieldType]?.includes(a.attributeType))
+                          .map(a => (
+                            <option key={a.logicalName} value={a.logicalName}>
+                              {a.displayName} ({a.logicalName})
+                            </option>
+                          ))
+                        }
                       </Select>
                     : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
                   }

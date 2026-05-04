@@ -27,6 +27,7 @@ export interface FieldMapping {
   lookupTable?: PoLookupTable
   skip: boolean
   migrateValue: boolean       // write the PO value to Dataverse when importing
+  useExistingField: boolean   // map to existing DV field — skip column creation
   manualDefault?: string      // LookupEntryUID for OptionSet; raw string for other types
 }
 

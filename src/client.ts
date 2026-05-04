@@ -47,6 +47,19 @@ export const client = getClient({
         ],
         responseInfo: { default: { type: 'object' } },
       },
+      GetEntityAttributes: {
+        path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/Attributes",
+        method: 'GET',
+        parameters: [
+          { name: 'connectionId',      in: 'path',   required: true,  type: 'string' },
+          { name: 'organization',      in: 'header', required: true,  type: 'string' },
+          { name: 'accept',            in: 'header', required: true,  type: 'string' },
+          { name: 'entityLogicalName', in: 'path',   required: true,  type: 'string' },
+          { name: '$select',           in: 'query',  required: false, type: 'string' },
+          { name: '$filter',           in: 'query',  required: false, type: 'string' },
+        ],
+        responseInfo: { default: { type: 'object' } },
+      },
       CreateEntityAttribute: {
         path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/Attributes",
         method: 'POST',

@@ -232,6 +232,39 @@ export async function getGlobalOptionSetMetadataId(name: string): Promise<string
   }
 }
 
+export interface DvEntityAttribute {
+  logicalName: string
+  displayName: string
+  attributeType: string
+}
+
+export async function fetchEntityAttributes(entityLogicalName: string): Promise<DvEntityAttribute[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    entityLogicalName,
+    '$select': 'LogicalName,DisplayName,AttributeType',
+    '$filter': "AttributeType ne 'Virtual' and AttributeType ne 'EntityName' and AttributeType ne 'Uniqueidentifier' and AttributeType ne 'CalendarRules'",
+  }
+
+  const res = await client.executeAsync<typeof params, { value?: unknown[] }>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'GetEntityAttributes',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return ((res.data?.value ?? []) as any[]).map(a => ({
+    logicalName: (a.LogicalName ?? a.logicalname ?? '') as string,
+    displayName: (a.DisplayName?.UserLocalizedLabel?.Label ?? a.LogicalName ?? '') as string,
+    attributeType: (a.AttributeType ?? '') as string,
+  }))
+}
+
 // ─── Test ─────────────────────────────────────────────────────────────────────
 
 export async function testDataverseConnection(): Promise<{

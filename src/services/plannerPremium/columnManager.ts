@@ -174,6 +174,7 @@ export async function createMigrationColumns(
     targetLogicalName: logicalName,
     skip: false,
     migrateValue: false,
+    useExistingField: false,
   }
 
   try {
@@ -204,7 +205,7 @@ export async function createColumns(
   solutionUniqueName: string,
   onProgress: (result: ColumnCreateResult) => void,
 ): Promise<ColumnCreateResult[]> {
-  const active = fieldMappings.filter(fm => !fm.skip)
+  const active = fieldMappings.filter(fm => !fm.skip && !fm.useExistingField)
   const results: ColumnCreateResult[] = []
 
   for (const fm of active) {
