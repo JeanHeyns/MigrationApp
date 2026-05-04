@@ -92,6 +92,12 @@ export function customFieldPayload(
         if (values.length > 0 || includeDefaults) payload[mapping.targetLogicalName] = values.join(',')
         break
       }
+      case 'Lookup':
+        if (mapping.relatedEntity?.logicalCollectionName) {
+          payload[`${mapping.targetLogicalName}@odata.bind`] =
+            `/${mapping.relatedEntity.logicalCollectionName}(${String(value).replace(/[{}]/g, '')})`
+        }
+        break
       default:
         payload[mapping.targetLogicalName] = value
         break

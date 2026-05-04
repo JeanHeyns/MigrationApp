@@ -28,6 +28,7 @@ export interface FieldMapping {
   skip: boolean
   migrateValue: boolean       // write the PO value to Dataverse when importing
   useExistingField: boolean   // map to existing DV field — skip column creation
+  relatedEntity?: { logicalName: string; logicalCollectionName: string }  // required when targetColumnType === 'Lookup'
   manualDefault?: string      // LookupEntryUID for OptionSet; raw string for other types
 }
 

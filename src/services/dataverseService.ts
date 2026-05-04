@@ -232,6 +232,42 @@ export async function getGlobalOptionSetMetadataId(name: string): Promise<string
   }
 }
 
+export interface DvEntityDefinition {
+  logicalName: string
+  logicalCollectionName: string
+  displayName: string
+}
+
+export async function fetchEntityDefinitions(): Promise<DvEntityDefinition[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    '$select': 'LogicalName,LogicalCollectionName,DisplayName,IsCustomEntity',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'ListEntityDefinitions',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = res.data as any
+  const items = ((raw?.value ?? raw?.d?.results ?? []) as any[])
+  return items
+    .map(e => ({
+      logicalName:           (e.LogicalName ?? '') as string,
+      logicalCollectionName: (e.LogicalCollectionName ?? `${e.LogicalName}s`) as string,
+      displayName:           (e.DisplayName?.UserLocalizedLabel?.Label ?? e.LogicalName ?? '') as string,
+    }))
+    .filter(e => e.logicalName)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+}
+
 export interface DvEntityAttribute {
   logicalName: string
   displayName: string

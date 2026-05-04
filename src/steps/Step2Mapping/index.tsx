@@ -12,7 +12,7 @@ import {
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
-import { fetchEntityAttributes, type DvEntityAttribute } from '../../services/dataverseService'
+import { fetchEntityAttributes, fetchEntityDefinitions, type DvEntityAttribute, type DvEntityDefinition } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
 import type { PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
@@ -44,7 +44,7 @@ const PO_COMPATIBLE_ATTR_TYPES: Record<PoCustomFieldType, string[]> = {
   Duration:    ['Integer', 'Decimal'],
   Date:        ['DateTime'],
   Flag:        ['Boolean'],
-  Lookup:      ['Picklist', 'String'],
+  Lookup:      ['Picklist', 'Lookup', 'Owner'],
   LookupMulti: ['MultiSelectPicklist'],
 }
 
@@ -216,6 +216,7 @@ export function Step2Mapping() {
   const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
+  const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [userLoadError, setUserLoadError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -238,6 +239,13 @@ export function Step2Mapping() {
     fetchEntityAttributes('msdyn_project')
       .then(attrs => setDvAttributes(attrs.sort((a, b) => a.displayName.localeCompare(b.displayName))))
       .catch(e => setDvAttrError(String(e)))
+  }, [])
+
+  // Load entity definitions for Lookup target table picker
+  useEffect(() => {
+    fetchEntityDefinitions()
+      .then(setDvEntities)
+      .catch(() => { /* non-fatal — user can type manually if needed */ })
   }, [])
 
   // Load Dataverse system users and owner resources for owner matching
@@ -279,6 +287,14 @@ export function Step2Mapping() {
 
   function setFieldSkip(idx: number, skip: boolean) {
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, skip } : m))
+  }
+
+  function setFieldRelatedEntity(idx: number, logicalName: string) {
+    const entity = dvEntities.find(e => e.logicalName === logicalName)
+    setFieldMappings(prev => prev.map((m, i) => i === idx
+      ? { ...m, relatedEntity: entity ? { logicalName: entity.logicalName, logicalCollectionName: entity.logicalCollectionName } : undefined }
+      : m
+    ))
   }
 
   function setFieldMigrateValue(idx: number, migrateValue: boolean) {
@@ -499,14 +515,28 @@ export function Step2Mapping() {
                   </Select>
                 </td>
                 <td className={styles.td}>
-                  {m.lookupTable
-                    ? <span style={{ fontSize: '12px' }}>
-                        {m.lookupTable.LookupTableName}<br />
-                        <span style={{ color: tokens.colorNeutralForeground3 }}>
-                          {m.lookupTable.entries.length} entries
+                  {!m.skip && !m.useExistingField && m.targetColumnType === 'Lookup'
+                    ? <Select
+                        size="small"
+                        value={m.relatedEntity?.logicalName ?? ''}
+                        onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
+                        style={{ minWidth: '160px' }}
+                      >
+                        <option value="">— pick related table —</option>
+                        {dvEntities.map(e => (
+                          <option key={e.logicalName} value={e.logicalName}>
+                            {e.displayName} ({e.logicalName})
+                          </option>
+                        ))}
+                      </Select>
+                    : m.lookupTable
+                      ? <span style={{ fontSize: '12px' }}>
+                          {m.lookupTable.LookupTableName}<br />
+                          <span style={{ color: tokens.colorNeutralForeground3 }}>
+                            {m.lookupTable.entries.length} entries
+                          </span>
                         </span>
-                      </span>
-                    : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                      : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
                   }
                 </td>
                 <td className={styles.td} style={{ textAlign: 'center' }}>

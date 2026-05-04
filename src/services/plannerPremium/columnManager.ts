@@ -128,6 +128,15 @@ function buildAttributeBody(
       }
     }
 
+    case 'Lookup': {
+      if (!fm.relatedEntity?.logicalName) throw new Error(`Lookup column "${fm.targetLogicalName}" requires a related entity`)
+      return {
+        ...base,
+        '@odata.type': 'Microsoft.Dynamics.CRM.LookupAttributeMetadata',
+        Targets: [fm.relatedEntity.logicalName],
+      }
+    }
+
     default:
       throw new Error(`Unsupported column type: ${type}`)
   }
