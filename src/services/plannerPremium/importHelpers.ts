@@ -54,10 +54,9 @@ export function customFieldPayload(
     if (mapping.skip || mapping.customField.CustomFieldEntityType !== entityType) continue
 
     const sourceValue = getSourceValue(source, mapping)
-    const value = sourceValue === undefined || sourceValue === null || sourceValue === ''
-      ? defaultValue(mapping, optionSetMappings)
-      : sourceValue
-    if ((sourceValue === undefined || sourceValue === null || sourceValue === '') && !includeDefaults) continue
+    const isMissing = sourceValue === undefined || sourceValue === null || sourceValue === ''
+    const value = isMissing ? (mapping.manualDefault ?? defaultValue(mapping, optionSetMappings)) : sourceValue
+    if (isMissing && !includeDefaults && !mapping.manualDefault) continue
     if (value === undefined || value === null || value === '') continue
 
     switch (mapping.targetColumnType) {
@@ -74,8 +73,15 @@ export function customFieldPayload(
       case 'OptionSet': {
         const osm = optionSetMappings.find(m => m.lookupTableUID === mapping.lookupTable?.LookupTableUID)
         const optionValue = osm?.valueMap[String(value)]
-        const fallback = defaultValue(mapping, optionSetMappings)
-        if (optionValue !== undefined || includeDefaults) payload[mapping.targetLogicalName] = optionValue ?? fallback
+        const fallbackValue = optionValue === undefined && mapping.manualDefault
+          ? osm?.valueMap[mapping.manualDefault]
+          : undefined
+        const resolved = optionValue ?? fallbackValue
+        if (resolved !== undefined) {
+          payload[mapping.targetLogicalName] = resolved
+        } else if (includeDefaults) {
+          payload[mapping.targetLogicalName] = defaultValue(mapping, optionSetMappings)
+        }
         break
       }
       case 'MultiSelectOptionSet': {

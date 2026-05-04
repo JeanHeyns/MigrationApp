@@ -224,6 +224,10 @@ export function Step2Mapping() {
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, skip } : m))
   }
 
+  function setFieldDefault(idx: number, value: string) {
+    setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, manualDefault: value || undefined } : m))
+  }
+
   // ── Owner mapping handlers ────────────────────────────────────────────────
 
   function setOwnerUser(idx: number, userId: string) {
@@ -366,6 +370,7 @@ export function Step2Mapping() {
               <th className={styles.th}>PO Type</th>
               <th className={styles.th}>Dataverse Column Type</th>
               <th className={styles.th}>Lookup / Notes</th>
+              <th className={styles.th}>Default if not mapped</th>
             </tr>
           </thead>
           <tbody>
@@ -414,6 +419,23 @@ export function Step2Mapping() {
                           {m.lookupTable.entries.length} entries
                         </span>
                       </span>
+                    : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                  }
+                </td>
+                <td className={styles.td}>
+                  {!m.skip && m.lookupTable && (m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet')
+                    ? <Select
+                        size="small"
+                        value={m.manualDefault ?? ''}
+                        onChange={(_, d) => setFieldDefault(idx, d.value)}
+                      >
+                        <option value="">— skip if not found —</option>
+                        {m.lookupTable.entries.map(e => (
+                          <option key={e.LookupEntryUID} value={e.LookupEntryUID}>
+                            {e.LookupEntryFullValue || e.LookupEntryValue || e.LookupEntryUID}
+                          </option>
+                        ))}
+                      </Select>
                     : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
                   }
                 </td>

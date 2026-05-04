@@ -26,6 +26,7 @@ export interface FieldMapping {
   targetLogicalName: string
   lookupTable?: PoLookupTable
   skip: boolean
+  manualDefault?: string  // LookupEntryUID for OptionSet; raw string for other types
 }
 
 export interface OwnerMapping {
