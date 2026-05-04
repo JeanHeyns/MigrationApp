@@ -51,7 +51,7 @@ export function customFieldPayload(
   const payload: Record<string, unknown> = {}
 
   for (const mapping of mappingConfig.fieldMappings) {
-    if (mapping.skip || mapping.customField.CustomFieldEntityType !== entityType) continue
+    if (mapping.skip || !mapping.migrateValue || mapping.customField.CustomFieldEntityType !== entityType) continue
 
     const sourceValue = getSourceValue(source, mapping)
     const isMissing = sourceValue === undefined || sourceValue === null || sourceValue === ''

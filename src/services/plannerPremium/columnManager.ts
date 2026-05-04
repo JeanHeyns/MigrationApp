@@ -173,6 +173,7 @@ export async function createMigrationColumns(
     targetColumnType: 'Text' as const,
     targetLogicalName: logicalName,
     skip: false,
+    migrateValue: false,
   }
 
   try {

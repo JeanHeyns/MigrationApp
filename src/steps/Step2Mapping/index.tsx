@@ -74,6 +74,7 @@ function buildInitialMappings(data: PoFetchedData, prefix: string): FieldMapping
       ? lookupMap.get(cf.CustomFieldLookupTableUID)
       : undefined,
     skip: cf.CustomFieldEntityType === 'Resource',
+    migrateValue: cf.CustomFieldEntityType === 'Project',
   }))
 }
 
@@ -242,6 +243,10 @@ export function Step2Mapping() {
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, skip } : m))
   }
 
+  function setFieldMigrateValue(idx: number, migrateValue: boolean) {
+    setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, migrateValue } : m))
+  }
+
   function setFieldDefault(idx: number, value: string) {
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, manualDefault: value || undefined } : m))
   }
@@ -321,6 +326,7 @@ export function Step2Mapping() {
   }
 
   const activeFields = fieldMappings.filter(m => !m.skip)
+  const migratingFields = fieldMappings.filter(m => !m.skip && m.migrateValue)
   const unmatchedOwners = ownerMappings.filter(m => !m.matched)
 
   return (
@@ -368,7 +374,7 @@ export function Step2Mapping() {
         <Button size="small" onClick={() => fileInputRef.current?.click()}>Load mapping from JSON</Button>
         <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleLoadJson} />
         <span className={styles.summary}>
-          {activeFields.length} of {fieldMappings.length} fields active ·{' '}
+          {activeFields.length} of {fieldMappings.length} fields active · {migratingFields.length} value(s) will migrate ·{' '}
           {unmatchedOwners.length > 0
             ? <span style={{ color: tokens.colorPaletteRedForeground1 }}>{unmatchedOwners.length} owner(s) unmatched</span>
             : <span style={{ color: '#107c10' }}>all owners matched</span>
@@ -388,6 +394,7 @@ export function Step2Mapping() {
               <th className={styles.th}>PO Type</th>
               <th className={styles.th}>Dataverse Column Type</th>
               <th className={styles.th}>Lookup / Notes</th>
+              <th className={styles.th} style={{ width: '80px' }}>Migrate value</th>
               <th className={styles.th}>Default if not mapped</th>
             </tr>
           </thead>
@@ -439,6 +446,13 @@ export function Step2Mapping() {
                       </span>
                     : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
                   }
+                </td>
+                <td className={styles.td} style={{ textAlign: 'center' }}>
+                  <Checkbox
+                    checked={m.migrateValue}
+                    disabled={m.skip || m.customField.CustomFieldEntityType === 'Task'}
+                    onChange={(_, d) => setFieldMigrateValue(idx, !!d.checked)}
+                  />
                 </td>
                 <td className={styles.td}>
                   {!m.skip && m.lookupTable && (m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet')
