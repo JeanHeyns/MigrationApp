@@ -79,9 +79,10 @@ async function applyProjectPatch(
   mappingConfig: MappingConfiguration,
   optionSetMappings: OptionSetMapping[],
 ): Promise<void> {
-  const ownerMapping = project.ProjectOwnerResourceUid
+  const ownerResourceId = project.ProjectOwnerResourceId ?? project.ProjectOwnerResourceUid
+  const ownerMapping = ownerResourceId
     ? mappingConfig.ownerMappings.find(
-        m => m.poResourceUid === project.ProjectOwnerResourceUid && m.matched && m.dataverseSystemUserId,
+        m => m.poResourceUid === ownerResourceId && m.matched && m.dataverseSystemUserId,
       )
     : undefined
 

@@ -13,7 +13,8 @@ import {
 import { useMigration } from '../../app/MigrationContext'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import { toLogicalName } from '../../services/projectOnline/customFields'
-import type { PoCustomFieldType, PoFetchedData } from '../../models/projectOnline.types'
+import { fetchResourcesByIds } from '../../services/projectOnline/resources'
+import type { PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
 import type { DataverseColumnType, FieldMapping, MappingConfiguration, OwnerMapping } from '../../models/mapping.types'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
 
@@ -76,18 +77,29 @@ function buildInitialMappings(data: PoFetchedData, prefix: string): FieldMapping
   }))
 }
 
-function buildOwnerMappings(data: PoFetchedData, systemUsers: DvSystemUser[]): OwnerMapping[] {
+function ownerResourceId(p: { ProjectOwnerResourceId?: string; ProjectOwnerResourceUid?: string }): string | undefined {
+  return p.ProjectOwnerResourceId ?? p.ProjectOwnerResourceUid
+}
+
+function buildOwnerMappings(
+  data: PoFetchedData,
+  systemUsers: DvSystemUser[],
+  ownerResources: PoResource[],
+): OwnerMapping[] {
   const ownerUids = [...new Set(
-    data.projects.map(p => p.ProjectOwnerResourceUid).filter(Boolean) as string[]
+    data.projects.map(ownerResourceId).filter(Boolean) as string[]
   )]
   return ownerUids.map(uid => {
-    const resource = data.resources.find(r => (r.ResourceUID ?? r.ResourceId) === uid)
+    const resource = ownerResources.find(r => r.ResourceId === uid)
+      ?? data.resources.find(r => (r.ResourceId ?? r.ResourceUID) === uid)
     const name = resource?.ResourceName ?? uid
     const email = resource?.ResourceEmailAddress
+    const ntAccount = resource?.ResourceNTAccount
 
     const matched = systemUsers.find(u =>
+      (email && u.internalemailaddress?.toLowerCase() === email.toLowerCase()) ||
       u.fullname?.toLowerCase() === name.toLowerCase() ||
-      (email && u.internalemailaddress?.toLowerCase() === email.toLowerCase())
+      (ntAccount && u.domainname?.toLowerCase() === ntAccount.toLowerCase())
     )
 
     return {
@@ -189,15 +201,21 @@ export function Step2Mapping() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchedData, mappingConfig, prefix])
 
-  // Load Dataverse system users for owner matching
+  // Load Dataverse system users and owner resources for owner matching
   useEffect(() => {
     if (!fetchedData) return
     setLoadingUsers(true)
-    fetchSystemUsers()
-      .then(users => {
+    const ownerIds = [...new Set(
+      fetchedData.projects.map(ownerResourceId).filter(Boolean) as string[]
+    )]
+    Promise.all([
+      fetchSystemUsers(),
+      fetchResourcesByIds(fetchedData.pwaUrl, ownerIds),
+    ])
+      .then(([users, ownerResources]) => {
         setSystemUsers(users)
         if (!mappingConfig) {
-          setOwnerMappings(buildOwnerMappings(fetchedData, users))
+          setOwnerMappings(buildOwnerMappings(fetchedData, users, ownerResources))
         }
       })
       .catch(e => setUserLoadError(String(e)))
