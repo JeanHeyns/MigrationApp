@@ -238,6 +238,8 @@ export interface DvEntityAttribute {
   attributeType: string
 }
 
+const EXCLUDED_ATTR_TYPES = new Set(['Virtual', 'EntityName', 'Uniqueidentifier', 'CalendarRules', 'ManagedProperty'])
+
 export async function fetchEntityAttributes(entityLogicalName: string): Promise<DvEntityAttribute[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
@@ -245,10 +247,9 @@ export async function fetchEntityAttributes(entityLogicalName: string): Promise<
     accept: 'application/json',
     entityLogicalName,
     '$select': 'LogicalName,DisplayName,AttributeType',
-    '$filter': "AttributeType ne 'Virtual' and AttributeType ne 'EntityName' and AttributeType ne 'Uniqueidentifier' and AttributeType ne 'CalendarRules'",
   }
 
-  const res = await client.executeAsync<typeof params, { value?: unknown[] }>({
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
     connectorOperation: {
       tableName: 'commondataserviceforapps',
       operationName: 'GetEntityAttributes',
@@ -258,11 +259,15 @@ export async function fetchEntityAttributes(entityLogicalName: string): Promise<
 
   if (!res.success) throw new Error(extractDvError(res))
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return ((res.data?.value ?? []) as any[]).map(a => ({
-    logicalName: (a.LogicalName ?? a.logicalname ?? '') as string,
-    displayName: (a.DisplayName?.UserLocalizedLabel?.Label ?? a.LogicalName ?? '') as string,
-    attributeType: (a.AttributeType ?? '') as string,
-  }))
+  const raw = res.data as any
+  const items = ((raw?.value ?? raw?.d?.results ?? []) as any[])
+  return items
+    .map(a => ({
+      logicalName: (a.LogicalName ?? a.logicalname ?? '') as string,
+      displayName: (a.DisplayName?.UserLocalizedLabel?.Label ?? a.LogicalName ?? '') as string,
+      attributeType: (a.AttributeType ?? '') as string,
+    }))
+    .filter(a => a.logicalName && !EXCLUDED_ATTR_TYPES.has(a.attributeType))
 }
 
 // ─── Test ─────────────────────────────────────────────────────────────────────

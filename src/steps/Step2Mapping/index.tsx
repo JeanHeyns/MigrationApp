@@ -215,6 +215,7 @@ export function Step2Mapping() {
   const [ownerMappings, setOwnerMappings] = useState<OwnerMapping[]>([])
   const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
+  const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [userLoadError, setUserLoadError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -236,7 +237,7 @@ export function Step2Mapping() {
   useEffect(() => {
     fetchEntityAttributes('msdyn_project')
       .then(attrs => setDvAttributes(attrs.sort((a, b) => a.displayName.localeCompare(b.displayName))))
-      .catch(() => { /* non-fatal — dropdown stays empty */ })
+      .catch(e => setDvAttrError(String(e)))
   }, [])
 
   // Load Dataverse system users and owner resources for owner matching
@@ -441,6 +442,11 @@ export function Step2Mapping() {
       {/* ── Field mapping table ── */}
       <div>
         <div className={styles.sectionTitle}>Custom Field Mapping ({fieldMappings.length} fields)</div>
+        {dvAttrError && (
+          <MessageBar intent="warning" style={{ marginBottom: '8px' }}>
+            <MessageBarBody>Could not load existing Dataverse fields: {dvAttrError}</MessageBarBody>
+          </MessageBar>
+        )}
         <table className={styles.table}>
           <thead>
             <tr>
