@@ -1,4 +1,8 @@
-# React + TypeScript + Vite
+# MigrationApp
+
+Project Online to Planner Premium migration app built with React, TypeScript, Vite, and Power Apps code apps.
+
+## Development
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
