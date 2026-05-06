@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Button,
   Field,
@@ -7,9 +7,12 @@ import {
   Spinner,
   MessageBar,
   MessageBarBody,
+  Tab,
+  TabList,
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
+import { ArrowUploadRegular, ArrowDownloadRegular } from '@fluentui/react-icons'
 import { useMigration } from '../../app/MigrationContext'
 import { fetchProjects } from '../../services/projectOnline/projects'
 import { fetchTasks } from '../../services/projectOnline/tasks'
@@ -18,6 +21,7 @@ import { fetchAssignments, fetchTeamMembers } from '../../services/projectOnline
 import { fetchCustomFields } from '../../services/projectOnline/customFields'
 import { fetchLookupTables } from '../../services/projectOnline/lookupTables'
 import { fetchSolutions } from '../../services/plannerPremium/dataverseClient'
+import { parseWorkbook, generateTemplate } from '../../services/fileImportService'
 import type { PoFetchedData } from '../../models/projectOnline.types'
 import type { DvSolution } from '../../models/plannerPremium.types'
 
@@ -134,6 +138,36 @@ const useStyles = makeStyles({
     display: 'flex',
     justifyContent: 'flex-end',
   },
+  uploadBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  uploadRow: {
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  uploadHint: {
+    fontSize: '12px',
+    color: tokens.colorNeutralForeground3,
+  },
+  fileName: {
+    fontSize: '13px',
+    color: tokens.colorNeutralForeground2,
+    fontStyle: 'italic',
+  },
+  templateRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 14px',
+    background: tokens.colorNeutralBackground3,
+    borderRadius: tokens.borderRadiusMedium,
+    fontSize: '13px',
+    color: tokens.colorNeutralForeground2,
+  },
 })
 
 type FetchItemStatus = 'pending' | 'fetching' | 'done' | 'error'
@@ -172,19 +206,30 @@ const STATUS_COLOR: Record<FetchItemStatus, string> = {
 
 export function Step1Connect() {
   const styles = useStyles()
-  const { pwaUrl, setPwaUrl, selectedSolution, setSelectedSolution, setFetchedData, nextStep } = useMigration()
+  const {
+    pwaUrl, setPwaUrl, dataSource, setDataSource,
+    selectedSolution, setSelectedSolution, setFetchedData, nextStep,
+  } = useMigration()
 
+  // ── Project Online state ─────────────────────────────────────────────────
   const [localUrl, setLocalUrl] = useState(pwaUrl)
-  const [phase, setPhase] = useState<'idle' | 'fetching' | 'done' | 'error'>('idle')
-  const [items, setItems] = useState<FetchItem[]>(INITIAL_ITEMS)
+  const [phase, setPhase]       = useState<'idle' | 'fetching' | 'done' | 'error'>('idle')
+  const [items, setItems]       = useState<FetchItem[]>(INITIAL_ITEMS)
   const [globalError, setGlobalError] = useState<string | null>(null)
-  const [result, setResult] = useState<PoFetchedData | null>(null)
+  const [result, setResult]     = useState<PoFetchedData | null>(null)
 
-  const [solutions, setSolutions] = useState<DvSolution[]>([])
+  // ── File upload state ────────────────────────────────────────────────────
+  const fileInputRef            = useRef<HTMLInputElement>(null)
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null)
+  const [uploadResult, setUploadResult] = useState<PoFetchedData | null>(null)
+  const [uploadError, setUploadError]   = useState<string | null>(null)
+  const [uploadParsing, setUploadParsing] = useState(false)
+
+  // ── Shared: Dataverse solutions ──────────────────────────────────────────
+  const [solutions, setSolutions]           = useState<DvSolution[]>([])
   const [solutionsLoading, setSolutionsLoading] = useState(true)
   const [solutionsError, setSolutionsError] = useState<string | null>(null)
 
-  // Load solutions from Dataverse on mount
   useEffect(() => {
     fetchSolutions()
       .then(setSolutions)
@@ -192,6 +237,7 @@ export function Step1Connect() {
       .finally(() => setSolutionsLoading(false))
   }, [])
 
+  // ── Project Online handlers ──────────────────────────────────────────────
   function updateItem(key: keyof PoFetchedData, patch: Partial<FetchItem>) {
     setItems(prev => prev.map(it => it.key === key ? { ...it, ...patch } : it))
   }
@@ -202,7 +248,6 @@ export function Step1Connect() {
       setGlobalError('URL must start with https://')
       return
     }
-
     setGlobalError(null)
     setPhase('fetching')
     setItems(INITIAL_ITEMS)
@@ -214,12 +259,7 @@ export function Step1Connect() {
       teamMembers: [], customFields: [], lookupTables: [],
     }
 
-    type FetchStep = {
-      key: keyof PoFetchedData
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      fn: () => Promise<any[]>
-    }
-
+    type FetchStep = { key: keyof PoFetchedData; fn: () => Promise<unknown[]> }
     const steps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
       { key: 'tasks',        fn: () => fetchTasks(url) },
@@ -231,7 +271,6 @@ export function Step1Connect() {
     ]
 
     let anyError = false
-
     for (const step of steps) {
       updateItem(step.key, { status: 'fetching' })
       try {
@@ -250,52 +289,192 @@ export function Step1Connect() {
     setPhase(anyError ? 'error' : 'done')
   }
 
+  // ── File upload handlers ─────────────────────────────────────────────────
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadedFile(file)
+    setUploadError(null)
+    setUploadResult(null)
+    setUploadParsing(true)
+    try {
+      const data = await parseWorkbook(file)
+      setUploadResult(data)
+      setFetchedData(data)
+    } catch (err) {
+      setUploadError(String(err))
+    } finally {
+      setUploadParsing(false)
+    }
+  }
+
+  function handleDownloadTemplate() {
+    const blob = generateTemplate()
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = 'migration-template.xlsx'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   function handleSolutionChange(id: string) {
     const sol = solutions.find(s => s.solutionid === id) ?? null
     setSelectedSolution(sol)
   }
 
-  const isFetching = phase === 'fetching'
-  const isDone = phase === 'done' || phase === 'error'
-  const canProceed = isDone && !!result && result.projects.length > 0 && !!selectedSolution
+  function handleSourceChange(source: string) {
+    setDataSource(source as 'ProjectOnline' | 'FileUpload')
+    // Reset results when switching source
+    setResult(null)
+    setUploadResult(null)
+    setUploadedFile(null)
+    setUploadError(null)
+    setGlobalError(null)
+    setPhase('idle')
+    setItems(INITIAL_ITEMS)
+  }
+
+  // ── canProceed logic ─────────────────────────────────────────────────────
+  const poReady     = dataSource === 'ProjectOnline' && (phase === 'done' || phase === 'error') && !!result && result.projects.length > 0
+  const fileReady   = dataSource === 'FileUpload' && !!uploadResult && uploadResult.projects.length > 0
+  const canProceed  = (poReady || fileReady) && !!selectedSolution
+
+  const isFetching  = phase === 'fetching'
+  const isDone      = phase === 'done' || phase === 'error'
+
+  // Active preview data (either source)
+  const activeResult = dataSource === 'ProjectOnline' ? result : uploadResult
+  const previewItems: { label: string; count: number }[] = activeResult
+    ? [
+        { label: 'Projects',     count: activeResult.projects.length },
+        { label: 'Tasks',        count: activeResult.tasks.length },
+        { label: 'Resources',    count: activeResult.resources.length },
+        { label: 'Assignments',  count: activeResult.assignments.length },
+        { label: 'Team Members', count: activeResult.teamMembers.length },
+        { label: 'Custom Fields',count: activeResult.customFields.length },
+        { label: 'Lookup Tables',count: activeResult.lookupTables.length },
+      ]
+    : []
 
   return (
     <div className={styles.root}>
       <div>
         <div className={styles.title}>Step 1 — Connect &amp; Read</div>
         <div className={styles.subtitle}>
-          Enter your Project Online PWA URL and select the target Power Platform solution.
+          Connect to Project Online or upload an Excel/CSV file to begin the migration.
         </div>
       </div>
 
-      {/* ── PWA URL ── */}
-      <div className={styles.urlRow}>
-        <Field label="Project Online PWA URL" className={styles.urlInput}>
-          <Input
-            type="url"
-            placeholder="https://contoso.sharepoint.com/sites/pwa"
-            value={localUrl}
-            onChange={e => setLocalUrl(e.target.value)}
-            disabled={isFetching}
-          />
-        </Field>
-        <Button
-          appearance="primary"
-          onClick={handleConnect}
-          disabled={isFetching || !localUrl.trim()}
-          icon={isFetching ? <Spinner size="tiny" /> : undefined}
-        >
-          {isFetching ? 'Reading…' : 'Connect & Read'}
-        </Button>
-      </div>
+      {/* ── Source selector ── */}
+      <TabList
+        selectedValue={dataSource}
+        onTabSelect={(_, d) => handleSourceChange(d.value as string)}
+      >
+        <Tab value="ProjectOnline">Project Online</Tab>
+        <Tab value="FileUpload">Upload File (Excel / CSV)</Tab>
+      </TabList>
 
-      {globalError && (
-        <MessageBar intent="error">
-          <MessageBarBody>{globalError}</MessageBarBody>
-        </MessageBar>
+      {/* ── Project Online panel ── */}
+      {dataSource === 'ProjectOnline' && (
+        <>
+          <div className={styles.urlRow}>
+            <Field label="Project Online PWA URL" className={styles.urlInput}>
+              <Input
+                type="url"
+                placeholder="https://contoso.sharepoint.com/sites/pwa"
+                value={localUrl}
+                onChange={e => setLocalUrl(e.target.value)}
+                disabled={isFetching}
+              />
+            </Field>
+            <Button
+              appearance="primary"
+              onClick={handleConnect}
+              disabled={isFetching || !localUrl.trim()}
+              icon={isFetching ? <Spinner size="tiny" /> : undefined}
+            >
+              {isFetching ? 'Reading…' : 'Connect & Read'}
+            </Button>
+          </div>
+
+          {globalError && (
+            <MessageBar intent="error">
+              <MessageBarBody>{globalError}</MessageBarBody>
+            </MessageBar>
+          )}
+
+          {(isFetching || isDone) && (
+            <div className={styles.progressArea}>
+              <div className={styles.progressLabel}>
+                {isFetching ? 'Reading Project Online data…' : 'Read complete'}
+              </div>
+              {items.map(item => (
+                <div key={item.key} className={styles.progressItem}>
+                  <span style={{ color: STATUS_COLOR[item.status], fontWeight: '600', width: '16px' }}>
+                    {STATUS_ICON[item.status]}
+                  </span>
+                  <span style={{ width: '130px' }}>{item.label}</span>
+                  {item.status === 'done'     && <span style={{ color: '#107c10' }}>{item.count} records</span>}
+                  {item.status === 'fetching' && <Spinner size="extra-tiny" />}
+                  {item.status === 'error'    && <span style={{ color: '#a4262c', fontSize: '11px' }}>{item.error}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
 
-      {/* ── Dataverse Solution ── */}
+      {/* ── File Upload panel ── */}
+      {dataSource === 'FileUpload' && (
+        <div className={styles.uploadBox}>
+          <div className={styles.templateRow}>
+            <ArrowDownloadRegular style={{ fontSize: '16px' }} />
+            <span>Download the migration template, fill it in, then upload it here.</span>
+            <Button
+              appearance="subtle"
+              size="small"
+              icon={<ArrowDownloadRegular />}
+              onClick={handleDownloadTemplate}
+            >
+              Download Template
+            </Button>
+          </div>
+
+          <div className={styles.uploadRow}>
+            <Button
+              appearance="secondary"
+              icon={<ArrowUploadRegular />}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadParsing}
+            >
+              {uploadParsing ? 'Parsing…' : 'Choose File'}
+            </Button>
+            {uploadParsing && <Spinner size="tiny" />}
+            {uploadedFile && !uploadParsing && (
+              <span className={styles.fileName}>{uploadedFile.name}</span>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              style={{ display: 'none' }}
+              onChange={handleFileChange}
+            />
+          </div>
+          <div className={styles.uploadHint}>
+            Supported formats: .xlsx, .xls, .csv — use the template above for correct column structure.
+          </div>
+
+          {uploadError && (
+            <MessageBar intent="error">
+              <MessageBarBody>Parse error: {uploadError}</MessageBarBody>
+            </MessageBar>
+          )}
+        </div>
+      )}
+
+      {/* ── Dataverse Solution (shared) ── */}
       <div className={styles.sectionBox}>
         <div className={styles.sectionTitle}>Dataverse Solution</div>
 
@@ -313,10 +492,7 @@ export function Step1Connect() {
 
         {!solutionsLoading && !solutionsError && (
           <div className={styles.solutionRow}>
-            <Field
-              label="Solution (determines field name prefix)"
-              className={styles.solutionSelect}
-            >
+            <Field label="Solution (determines field name prefix)" className={styles.solutionSelect}>
               <Select
                 value={selectedSolution?.solutionid ?? ''}
                 onChange={(_, d) => handleSolutionChange(d.value)}
@@ -329,7 +505,6 @@ export function Step1Connect() {
                 ))}
               </Select>
             </Field>
-
             {selectedSolution && (
               <div className={styles.prefixBadge}>
                 prefix: {selectedSolution.publisherPrefix}_
@@ -345,38 +520,12 @@ export function Step1Connect() {
         )}
       </div>
 
-      {/* ── PO fetch progress ── */}
-      {(isFetching || isDone) && (
-        <div className={styles.progressArea}>
-          <div className={styles.progressLabel}>
-            {isFetching ? 'Reading Project Online data…' : 'Read complete'}
-          </div>
-          {items.map(item => (
-            <div key={item.key} className={styles.progressItem}>
-              <span style={{ color: STATUS_COLOR[item.status], fontWeight: '600', width: '16px' }}>
-                {STATUS_ICON[item.status]}
-              </span>
-              <span style={{ width: '130px' }}>{item.label}</span>
-              {item.status === 'done' && (
-                <span style={{ color: '#107c10' }}>{item.count} records</span>
-              )}
-              {item.status === 'fetching' && (
-                <Spinner size="extra-tiny" />
-              )}
-              {item.status === 'error' && (
-                <span style={{ color: '#a4262c', fontSize: '11px' }}>{item.error}</span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ── Preview cards ── */}
-      {isDone && result && (
+      {/* ── Preview cards (shared) ── */}
+      {previewItems.length > 0 && (
         <>
           <div className={styles.previewGrid}>
-            {items.filter(i => i.status === 'done').map(item => (
-              <div key={item.key} className={styles.previewCard}>
+            {previewItems.filter(i => i.count > 0).map(item => (
+              <div key={item.label} className={styles.previewCard}>
                 <div className={styles.previewCount}>{item.count}</div>
                 <div className={styles.previewLabel}>{item.label}</div>
               </div>
@@ -389,11 +538,7 @@ export function Step1Connect() {
                 Select a solution to continue
               </span>
             )}
-            <Button
-              appearance="primary"
-              onClick={nextStep}
-              disabled={!canProceed}
-            >
+            <Button appearance="primary" onClick={nextStep} disabled={!canProceed}>
               Next: Field Mapping →
             </Button>
           </div>

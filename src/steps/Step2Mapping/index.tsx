@@ -223,7 +223,7 @@ export function Step2Mapping() {
   const styles = useStyles()
   const {
     fetchedData, mappingConfig, setMappingConfig, nextStep, prevStep,
-    selectedSolution, skipColumnCreation, setSkipColumnCreation,
+    selectedSolution, skipColumnCreation, setSkipColumnCreation, dataSource,
   } = useMigration()
 
   const prefix = selectedSolution?.publisherPrefix ?? 'cr9a1'
@@ -281,10 +281,11 @@ export function Step2Mapping() {
     const ownerIds = [...new Set(
       fetchedData.projects.map(ownerResourceId).filter(Boolean) as string[]
     )]
-    Promise.all([
-      fetchSystemUsers(),
-      fetchResourcesByIds(fetchedData.pwaUrl, ownerIds),
-    ])
+    const ownerResourcesPromise = dataSource === 'ProjectOnline'
+      ? fetchResourcesByIds(fetchedData.pwaUrl, ownerIds)
+      : Promise.resolve([] as import('../../models/projectOnline.types').PoResource[])
+
+    Promise.all([fetchSystemUsers(), ownerResourcesPromise])
       .then(([users, ownerResources]) => {
         setSystemUsers(users)
         if (!mappingConfig) {

@@ -3,9 +3,12 @@ import type { PoFetchedData } from '../models/projectOnline.types'
 import type { MappingConfiguration, OptionSetMapping } from '../models/mapping.types'
 import type { DvSolution, ImportResult, LogEntry } from '../models/plannerPremium.types'
 
+export type DataSource = 'ProjectOnline' | 'FileUpload'
+
 interface MigrationState {
   currentStep: number
   pwaUrl: string
+  dataSource: DataSource
   selectedSolution: DvSolution | null
   skipColumnCreation: boolean
   fetchedData: PoFetchedData | null
@@ -20,6 +23,7 @@ interface MigrationActions {
   nextStep: () => void
   prevStep: () => void
   setPwaUrl: (url: string) => void
+  setDataSource: (source: DataSource) => void
   setSelectedSolution: (solution: DvSolution | null) => void
   setSkipColumnCreation: (skip: boolean) => void
   setFetchedData: (data: PoFetchedData) => void
@@ -38,6 +42,7 @@ const MigrationContext = createContext<MigrationContextType | null>(null)
 export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [currentStep, setCurrentStep] = useState(1)
   const [pwaUrl, setPwaUrl] = useState('')
+  const [dataSource, setDataSource] = useState<DataSource>('ProjectOnline')
   const [selectedSolution, setSelectedSolution] = useState<DvSolution | null>(null)
   const [skipColumnCreation, setSkipColumnCreation] = useState(false)
   const [fetchedData, setFetchedData] = useState<PoFetchedData | null>(null)
@@ -60,9 +65,9 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <MigrationContext.Provider value={{
-      currentStep, pwaUrl, selectedSolution, skipColumnCreation,
+      currentStep, pwaUrl, dataSource, selectedSolution, skipColumnCreation,
       fetchedData, mappingConfig, optionSetMappings, importResults, logs,
-      setCurrentStep, nextStep, prevStep, setPwaUrl,
+      setCurrentStep, nextStep, prevStep, setPwaUrl, setDataSource,
       setSelectedSolution, setSkipColumnCreation,
       setFetchedData, setMappingConfig, setOptionSetMappings,
       addImportResult, clearImportResults, addLog, clearLogs,
