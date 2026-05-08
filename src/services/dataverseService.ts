@@ -388,6 +388,51 @@ export async function fetchSolutionEntityIds(solutionId: string): Promise<Set<st
   return new Set(rows.map(r => String(r['objectid'] ?? '').toLowerCase().replace(/[{}]/g, '')))
 }
 
+export async function fetchSolutionComponentIds(solutionId: string, componentType: number): Promise<Set<string>> {
+  const rows = await listRecords(
+    'solutioncomponents',
+    'objectid',
+    `_solutionid_value eq ${solutionId} and componenttype eq ${componentType}`,
+    5000,
+  )
+  return new Set(rows.map(r => String(r['objectid'] ?? '').toLowerCase().replace(/[{}]/g, '')))
+}
+
+export interface DvGlobalOptionSetDefinition {
+  name: string
+  displayName: string
+  metadataId: string
+}
+
+export async function fetchGlobalOptionSetDefinitions(): Promise<DvGlobalOptionSetDefinition[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    '$select': 'Name,DisplayName,MetadataId',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'ListGlobalOptionSetDefinitions',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = res.data as any
+  return (((raw?.value ?? []) as any[])
+    .map(os => ({
+      name: (os.Name ?? '') as string,
+      displayName: (os.DisplayName?.UserLocalizedLabel?.Label ?? os.Name ?? '') as string,
+      metadataId: (os.MetadataId ?? '') as string,
+    }))
+    .filter(os => os.name && os.metadataId)
+    .sort((a, b) => a.displayName.localeCompare(b.displayName)))
+}
+
 export interface DvEntityAttribute {
   logicalName: string
   displayName: string

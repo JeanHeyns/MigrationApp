@@ -88,7 +88,7 @@ export function Step3CreateColumns() {
   const lookupMappings = activeMappings.filter(f => f.targetColumnType === 'OptionSet' || f.targetColumnType === 'MultiSelectOptionSet')
   const uniqueLookupCount = new Set(lookupMappings.map(f => f.lookupTable?.LookupTableUID).filter(Boolean)).size
   const lookupEntityCount = new Set(activeMappings
-    .filter(f => f.targetColumnType === 'Lookup')
+    .filter(f => f.targetColumnType === 'Lookup' && !f.useExistingLookupEntity)
     .map(f => f.lookupTable?.LookupTableUID)
     .filter(Boolean)
   ).size

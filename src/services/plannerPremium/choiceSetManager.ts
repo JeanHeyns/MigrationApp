@@ -42,7 +42,7 @@ export async function createOptionSets(
     if (!fm.lookupTable) continue
     const uid = fm.lookupTable.LookupTableUID
     if (!seen.has(uid)) {
-      seen.set(uid, { lookupTableUID: uid, optionSetName: fm.targetLogicalName, table: fm.lookupTable })
+      seen.set(uid, { lookupTableUID: uid, optionSetName: fm.optionSetName ?? fm.targetLogicalName, table: fm.lookupTable })
     }
   }
 
@@ -74,6 +74,13 @@ export async function createOptionSets(
     }
 
     try {
+      const existingMetadataId = await getGlobalOptionSetMetadataId(optionSetName)
+      if (existingMetadataId) {
+        results.push({ lookupTableUID, optionSetName, metadataId: existingMetadataId, valueMap })
+        onProgress(optionSetName, true, true)
+        continue
+      }
+
       const created = await createGlobalOptionSet(body, solutionUniqueName)
       const metadataId =
         ((created['MetadataId'] ?? created['metadataid']) as string | undefined) ??

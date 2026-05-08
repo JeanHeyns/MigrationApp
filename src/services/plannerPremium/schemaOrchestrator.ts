@@ -33,6 +33,7 @@ function isLookupBackedMapping(mappingConfig: MappingConfiguration, lookupTableU
   return mappingConfig.fieldMappings.some(m =>
     !m.skip &&
     m.targetColumnType === 'Lookup' &&
+    !m.useExistingLookupEntity &&
     m.lookupTable?.LookupTableUID === lookupTableUID
   )
 }
@@ -100,7 +101,7 @@ export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput)
   }
 
   const fieldMappings = mappingConfig.fieldMappings.map(mapping => {
-    if (mapping.targetColumnType !== 'Lookup' || !mapping.lookupTable) return mapping
+    if (mapping.targetColumnType !== 'Lookup' || !mapping.lookupTable || mapping.useExistingLookupEntity) return mapping
     const ensured = lookupEntities.get(mapping.lookupTable.LookupTableUID)
     return {
       ...mapping,

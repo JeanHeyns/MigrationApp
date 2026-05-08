@@ -12,7 +12,16 @@ import {
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
-import { fetchEntityAttributes, fetchEntityDefinitions, fetchSolutionEntityIds, type DvEntityAttribute, type DvEntityDefinition } from '../../services/dataverseService'
+import {
+  fetchEntityAttributes,
+  fetchEntityDefinitions,
+  fetchGlobalOptionSetDefinitions,
+  fetchSolutionComponentIds,
+  fetchSolutionEntityIds,
+  type DvEntityAttribute,
+  type DvEntityDefinition,
+  type DvGlobalOptionSetDefinition,
+} from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
 import { lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
@@ -240,6 +249,7 @@ function buildSchemaOnlyMappings(data: PoFetchedData, prefix: string): FieldMapp
       skip: cf.CustomFieldEntityType === 'Resource',
       migrateValue: false,
       useExistingField: false,
+      useExistingLookupEntity: false,
       relatedEntity: targetColumnType === 'Lookup' && lookupTable
         ? { logicalName: lookupEntityLogicalName(lookupTable, prefix), logicalCollectionName: '' }
         : undefined,
@@ -376,6 +386,8 @@ export function Step2Mapping() {
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
   const [solutionEntityIds, setSolutionEntityIds] = useState<Set<string>>(new Set())
+  const [globalOptionSets, setGlobalOptionSets] = useState<DvGlobalOptionSetDefinition[]>([])
+  const [solutionOptionSetIds, setSolutionOptionSetIds] = useState<Set<string>>(new Set())
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [userLoadError, setUserLoadError] = useState<string | null>(null)
   const [loadWarning, setLoadWarning] = useState<string | null>(null)
@@ -421,6 +433,20 @@ export function Step2Mapping() {
     fetchSolutionEntityIds(selectedSolution.solutionid)
       .then(setSolutionEntityIds)
       .catch(() => { /* non-fatal — fall back to unfiltered list */ })
+  }, [selectedSolution?.solutionid])
+
+  useEffect(() => {
+    Promise.all([
+      fetchGlobalOptionSetDefinitions(),
+      selectedSolution?.solutionid
+        ? fetchSolutionComponentIds(selectedSolution.solutionid, 9)
+        : Promise.resolve(new Set<string>()),
+    ])
+      .then(([sets, ids]) => {
+        setGlobalOptionSets(sets)
+        setSolutionOptionSetIds(ids)
+      })
+      .catch(() => { /* non-fatal - schemaOnly can still create new choices */ })
   }, [selectedSolution?.solutionid])
 
   // Load Dataverse system users and owner resources for owner matching
@@ -469,6 +495,34 @@ export function Step2Mapping() {
     const entity = dvEntities.find(e => e.logicalName === logicalName)
     setFieldMappings(prev => prev.map((m, i) => i === idx
       ? { ...m, relatedEntity: entity ? { logicalName: entity.logicalName, logicalCollectionName: entity.logicalCollectionName } : undefined }
+      : m
+    ))
+  }
+
+  function setSchemaOnlyLookupSource(idx: number, value: string) {
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      if (value === '__create') {
+        return {
+          ...m,
+          useExistingLookupEntity: false,
+          relatedEntity: m.lookupTable
+            ? { logicalName: lookupEntityLogicalName(m.lookupTable, prefix), logicalCollectionName: '' }
+            : undefined,
+        }
+      }
+      const entity = dvEntities.find(e => e.logicalName === value)
+      return {
+        ...m,
+        useExistingLookupEntity: true,
+        relatedEntity: entity ? { logicalName: entity.logicalName, logicalCollectionName: entity.logicalCollectionName } : undefined,
+      }
+    }))
+  }
+
+  function setSchemaOnlyOptionSetSource(idx: number, value: string) {
+    setFieldMappings(prev => prev.map((m, i) => i === idx
+      ? { ...m, optionSetName: value === '__create' ? undefined : value }
       : m
     ))
   }
@@ -630,6 +684,12 @@ export function Step2Mapping() {
   const activeFields = fieldMappings.filter(m => !m.skip)
   const migratingFields = fieldMappings.filter(m => !m.skip && m.migrateValue)
   const unmatchedOwners = ownerMappings.filter(m => !m.matched)
+  const solutionEntities = dvEntities.filter(e =>
+    solutionEntityIds.has((e.metadataId ?? '').toLowerCase().replace(/[{}]/g, ''))
+  )
+  const solutionChoices = globalOptionSets.filter(os =>
+    solutionOptionSetIds.has(os.metadataId.toLowerCase().replace(/[{}]/g, ''))
+  )
   const unmappedDataOnlyRows = migrationMode === 'dataOnly' && schemaSnapshot
     ? fieldMappings.filter(m => {
         if (m.skip) return false
@@ -793,8 +853,42 @@ export function Step2Mapping() {
                             ))}
                           </Select>
                           {m.targetColumnType === 'Lookup' && m.lookupTable && (
+                            <Select
+                              size="small"
+                              className={styles.selectFixed}
+                              value={m.useExistingLookupEntity ? (m.relatedEntity?.logicalName ?? '') : '__create'}
+                              onChange={(_, d) => setSchemaOnlyLookupSource(idx, d.value)}
+                              style={{ marginTop: '6px' }}
+                            >
+                              <option value="__create">Create lookup table: {lookupEntityLogicalName(m.lookupTable, prefix)}</option>
+                              {solutionEntities.map(e => (
+                                <option key={e.logicalName} value={e.logicalName} title={`${e.displayName} (${e.logicalName})`}>
+                                  Use existing: {e.displayName} ({e.logicalName})
+                                </option>
+                              ))}
+                            </Select>
+                          )}
+                          {(m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet') && m.lookupTable && (
+                            <Select
+                              size="small"
+                              className={styles.selectFixed}
+                              value={m.optionSetName ?? '__create'}
+                              onChange={(_, d) => setSchemaOnlyOptionSetSource(idx, d.value)}
+                              style={{ marginTop: '6px' }}
+                            >
+                              <option value="__create">Create choice: {m.targetLogicalName}</option>
+                              {solutionChoices.map(os => (
+                                <option key={os.name} value={os.name} title={`${os.displayName} (${os.name})`}>
+                                  Use existing: {os.displayName} ({os.name})
+                                </option>
+                              ))}
+                            </Select>
+                          )}
+                          {m.targetColumnType === 'Lookup' && m.lookupTable && (
                             <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
-                              Will create lookup entity {lookupEntityLogicalName(m.lookupTable, prefix)} with {m.lookupTable.entries.length} entries
+                              {m.useExistingLookupEntity
+                                ? 'Will create a lookup column to the selected table.'
+                                : <>Will create lookup entity {lookupEntityLogicalName(m.lookupTable, prefix)} with {m.lookupTable.entries.length} entries</>}
                             </div>
                           )}
                           {m.targetColumnType !== 'Lookup' && m.lookupTable && (

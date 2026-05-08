@@ -28,8 +28,10 @@ export interface FieldMapping {
   lookupTable?: PoLookupTable
   skip: boolean
   migrateValue: boolean       // write the PO value to Dataverse when importing
-  useExistingField: boolean   // map to existing DV field — skip column creation
+  useExistingField: boolean   // map to existing DV field - skip column creation
+  useExistingLookupEntity?: boolean
   relatedEntity?: { logicalName: string; logicalCollectionName: string }  // required when targetColumnType === 'Lookup'
+  optionSetName?: string      // existing global choice name for OptionSet/MultiSelectOptionSet
   manualDefault?: string      // LookupEntryUID for OptionSet; raw string for other types
   matchSource?: 'auto' | 'manual'  // dataOnly mode: how targetLogicalName was set
 }
