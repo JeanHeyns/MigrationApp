@@ -14,7 +14,10 @@ import { writeResources } from '../../services/plannerPremium/resourceWriter'
 import { writeProjects } from '../../services/plannerPremium/projectWriter'
 import { writeTasks } from '../../services/plannerPremium/taskWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
+import { buildResolverMap, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
+import type { FieldResolver } from '../../services/plannerPremium/resolverFactory'
 import type { ImportError, ImportResult } from '../../models/plannerPremium.types'
+import type { SkippedFieldInstance } from '../../models/dataOnly.types'
 
 const useStyles = makeStyles({
   root: { padding: '32px', maxWidth: '1100px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' },
@@ -52,13 +55,16 @@ const useStyles = makeStyles({
   },
 })
 
-type Phase = 'Ready' | 'Resources' | 'Projects' | 'Team members' | 'Tasks' | 'Assignments' | 'Done' | 'Failed'
+type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Projects' | 'Team members' | 'Tasks' | 'Assignments' | 'Done' | 'Failed'
 
 export function Step4Import() {
   const styles = useStyles()
   const {
     fetchedData, mappingConfig, optionSetMappings, nextStep, prevStep,
     addImportResult, clearImportResults,
+    migrationMode, resolverPlan,
+    addSkippedFieldInstances, clearSkippedFieldInstances,
+    addLog,
   } = useMigration()
   const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(
     () => new Set(fetchedData?.projects.map(p => p.ProjectId) ?? []),
@@ -139,6 +145,9 @@ export function Step4Import() {
     setFatalError(null)
     setLogLines([])
     clearImportResults()
+    clearSkippedFieldInstances()
+
+    const isDataOnly = migrationMode === 'dataOnly'
 
     const workTotal =
       data.resources.length +
@@ -148,6 +157,37 @@ export function Step4Import() {
       selectedAssignments.length
     setTotal(workTotal)
     setCompleted(0)
+
+    // ── Build resolvers (dataOnly mode only) ──
+    let resolvers: Map<string, FieldResolver> | undefined
+
+    if (isDataOnly) {
+      if (!resolverPlan) {
+        setFatalError('Resolver plan is missing. Go back to Step 2 and save the mapping.')
+        setRunning(false)
+        return
+      }
+
+      setPhase('Building resolvers')
+      appendLog('Building field resolvers from mapping plan…')
+
+      try {
+        clearResolverCaches()
+        const { resolvers: built, warnings } = await buildResolverMap(resolverPlan)
+        resolvers = built
+
+        for (const w of warnings) {
+          const level = w.severity === 'error' ? 'error' : 'warning'
+          appendLog(`[Resolver ${w.severity.toUpperCase()}] ${w.field}: ${w.message}`)
+          addLog({ level, message: `Resolver build — ${w.field}: ${w.message}` })
+        }
+        appendLog(`Resolvers ready: ${resolvers.size} field(s)`)
+      } catch (e) {
+        setFatalError(`Failed to build resolvers: ${String(e)}`)
+        setRunning(false)
+        return
+      }
+    }
 
     try {
       setPhase('Resources')
@@ -163,10 +203,28 @@ export function Step4Import() {
       appendLog(`Importing ${selectedProjects.length} projects`)
       const projectResults = await writeProjects(selectedProjects, config, optionSetMappings, r => {
         setCompleted(c => c + 1)
-        appendLog(`${r.success ? 'OK' : 'ERR'} project ${r.poProjectId}${r.error ? `: ${r.error.message}` : ''}`)
-      })
+        appendLog(`${r.success ? 'OK' : 'ERR'} project ${r.poProjectId}${r.error ? `: ${r.error.message}` : ''}${r.skippedFields?.length ? ` (${r.skippedFields.length} field(s) skipped)` : ''}`)
+      }, resolvers)
       addImportResult(makeResult('Projects', projectResults.length, projectResults.flatMap(r => r.error ? [r.error] : [])))
       const projectIdMap = Object.fromEntries(projectResults.filter(r => r.success && r.dvProjectId).map(r => [r.poProjectId, r.dvProjectId as string]))
+
+      // Collect skipped field instances (dataOnly only)
+      if (isDataOnly) {
+        const skipped: SkippedFieldInstance[] = projectResults.flatMap(r =>
+          (r.skippedFields ?? []).map(sf => ({
+            poField: sf.poField,
+            dvField: sf.dvField,
+            reason: sf.reason,
+            originalValue: sf.originalValue,
+            partialResolution: sf.partialResolution,
+            sourceId: r.poProjectId,
+          })),
+        )
+        if (skipped.length > 0) {
+          addSkippedFieldInstances(skipped)
+          appendLog(`${skipped.length} skipped field value(s) — see Step 5 Skipped Fields for details`)
+        }
+      }
 
       setPhase('Team members')
       appendLog(`Importing ${selectedTeamMembers.length} project team members`)

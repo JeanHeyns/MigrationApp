@@ -86,6 +86,51 @@ export const client = getClient({
         ],
         responseInfo: { default: { type: 'object' } },
       },
+      // Schema inspection: list custom attributes on an entity
+      GetEntityAttributes: {
+        path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/Attributes",
+        method: 'GET',
+        parameters: [
+          { name: 'connectionId',    in: 'path',   required: true,  type: 'string' },
+          { name: 'organization',    in: 'header', required: true,  type: 'string' },
+          { name: 'accept',          in: 'header', required: true,  type: 'string' },
+          { name: 'entityLogicalName', in: 'path', required: true,  type: 'string' },
+          { name: '$select',         in: 'query',  required: false, type: 'string' },
+          { name: '$filter',         in: 'query',  required: false, type: 'string' },
+          { name: '$expand',         in: 'query',  required: false, type: 'string' },
+        ],
+        responseInfo: { default: { type: 'object' } },
+      },
+      // Schema inspection: typed attribute collection via OData cast (e.g. PicklistAttributeMetadata)
+      GetEntityAttributesByCast: {
+        path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/Attributes/{attributeCast}",
+        method: 'GET',
+        parameters: [
+          { name: 'connectionId',    in: 'path',   required: true,  type: 'string' },
+          { name: 'organization',    in: 'header', required: true,  type: 'string' },
+          { name: 'accept',          in: 'header', required: true,  type: 'string' },
+          { name: 'entityLogicalName', in: 'path', required: true,  type: 'string' },
+          { name: 'attributeCast',   in: 'path',   required: true,  type: 'string' },
+          { name: '$select',         in: 'query',  required: false, type: 'string' },
+          { name: '$filter',         in: 'query',  required: false, type: 'string' },
+          { name: '$expand',         in: 'query',  required: false, type: 'string' },
+        ],
+        responseInfo: { default: { type: 'object' } },
+      },
+      // Schema inspection: ManyToOne relationships for navigation property lookup
+      GetEntityManyToOneRelationships: {
+        path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/ManyToOneRelationships",
+        method: 'GET',
+        parameters: [
+          { name: 'connectionId',    in: 'path',   required: true,  type: 'string' },
+          { name: 'organization',    in: 'header', required: true,  type: 'string' },
+          { name: 'accept',          in: 'header', required: true,  type: 'string' },
+          { name: 'entityLogicalName', in: 'path', required: true,  type: 'string' },
+          { name: '$select',         in: 'query',  required: false, type: 'string' },
+          { name: '$filter',         in: 'query',  required: false, type: 'string' },
+        ],
+        responseInfo: { default: { type: 'object' } },
+      },
     },
   },
   sharepointonline: {

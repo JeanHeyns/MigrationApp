@@ -3,6 +3,8 @@ import {
   Button,
   Field,
   Input,
+  Radio,
+  RadioGroup,
   Select,
   Spinner,
   MessageBar,
@@ -21,6 +23,7 @@ import { fetchAssignments, fetchTeamMembers } from '../../services/projectOnline
 import { fetchCustomFields } from '../../services/projectOnline/customFields'
 import { fetchLookupTables } from '../../services/projectOnline/lookupTables'
 import { fetchSolutions } from '../../services/plannerPremium/dataverseClient'
+import { inspectSolution } from '../../services/plannerPremium/schemaInspector'
 import { parseWorkbook, generateTemplate } from '../../services/fileImportService'
 import type { PoFetchedData } from '../../models/projectOnline.types'
 import type { DvSolution } from '../../models/plannerPremium.types'
@@ -168,6 +171,34 @@ const useStyles = makeStyles({
     fontSize: '13px',
     color: tokens.colorNeutralForeground2,
   },
+  modeToggleRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  modeLabel: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: tokens.colorNeutralForeground1,
+  },
+  scanSummary: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '13px',
+    color: '#107c10',
+    padding: '8px 12px',
+    background: tokens.colorNeutralBackground3,
+    borderRadius: tokens.borderRadiusMedium,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+  },
+  scanRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '13px',
+    color: tokens.colorNeutralForeground2,
+  },
 })
 
 type FetchItemStatus = 'pending' | 'fetching' | 'done' | 'error'
@@ -209,6 +240,7 @@ export function Step1Connect() {
   const {
     pwaUrl, setPwaUrl, dataSource, setDataSource,
     selectedSolution, setSelectedSolution, setFetchedData, nextStep,
+    migrationMode, setMigrationMode, schemaSnapshot, setSchemaSnapshot,
   } = useMigration()
 
   // ── Project Online state ─────────────────────────────────────────────────
@@ -230,12 +262,39 @@ export function Step1Connect() {
   const [solutionsLoading, setSolutionsLoading] = useState(true)
   const [solutionsError, setSolutionsError] = useState<string | null>(null)
 
+  // ── Schema scan (dataOnly mode) ──────────────────────────────────────────
+  const [scanPhase, setScanPhase] = useState<'idle' | 'scanning' | 'done' | 'error'>('idle')
+  const [scanError, setScanError] = useState<string | null>(null)
+
   useEffect(() => {
     fetchSolutions()
       .then(setSolutions)
       .catch(e => setSolutionsError(String(e)))
       .finally(() => setSolutionsLoading(false))
   }, [])
+
+  // Auto-trigger scan when dataOnly mode is active and solution is chosen (or changed)
+  useEffect(() => {
+    if (migrationMode !== 'dataOnly' || !selectedSolution) return
+    if (schemaSnapshot?.solutionId === selectedSolution.solutionid) return
+    runScan()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [migrationMode, selectedSolution?.solutionid])
+
+  async function runScan() {
+    if (!selectedSolution) return
+    setScanPhase('scanning')
+    setScanError(null)
+    setSchemaSnapshot(null)
+    try {
+      const snapshot = await inspectSolution(selectedSolution.solutionid)
+      setSchemaSnapshot(snapshot)
+      setScanPhase('done')
+    } catch (e) {
+      setScanError(String(e))
+      setScanPhase('error')
+    }
+  }
 
   // ── Project Online handlers ──────────────────────────────────────────────
   function updateItem(key: keyof PoFetchedData, patch: Partial<FetchItem>) {
@@ -338,7 +397,8 @@ export function Step1Connect() {
   // ── canProceed logic ─────────────────────────────────────────────────────
   const poReady     = dataSource === 'ProjectOnline' && (phase === 'done' || phase === 'error') && !!result && result.projects.length > 0
   const fileReady   = dataSource === 'FileUpload' && !!uploadResult && uploadResult.projects.length > 0
-  const canProceed  = (poReady || fileReady) && !!selectedSolution
+  const scanOk      = migrationMode === 'full' || (migrationMode === 'dataOnly' && scanPhase === 'done')
+  const canProceed  = (poReady || fileReady) && !!selectedSolution && scanOk
 
   const isFetching  = phase === 'fetching'
   const isDone      = phase === 'done' || phase === 'error'
@@ -517,6 +577,70 @@ export function Step1Connect() {
           <div style={{ fontSize: '13px', color: tokens.colorNeutralForeground3 }}>
             No unmanaged solutions found in this Dataverse environment.
           </div>
+        )}
+
+        {/* ── Migration mode toggle (shown once solution is selected) ── */}
+        {selectedSolution && (
+          <div className={styles.modeToggleRow}>
+            <div className={styles.modeLabel}>Migration mode</div>
+            <RadioGroup
+              value={migrationMode}
+              onChange={(_, d) => {
+                setMigrationMode(d.value as 'full' | 'dataOnly')
+                if (d.value === 'full') {
+                  setSchemaSnapshot(null)
+                  setScanPhase('idle')
+                  setScanError(null)
+                }
+              }}
+              layout="horizontal"
+            >
+              <Radio value="full" label="Full migration — create columns + migrate data" />
+              <Radio value="dataOnly" label="Data only — use existing schema, migrate data" />
+            </RadioGroup>
+          </div>
+        )}
+
+        {/* ── Schema scan feedback (dataOnly mode) ── */}
+        {migrationMode === 'dataOnly' && selectedSolution && (
+          <>
+            {scanPhase === 'scanning' && (
+              <div className={styles.scanRow}>
+                <Spinner size="tiny" />
+                <span>Scanning Dataverse schema…</span>
+              </div>
+            )}
+
+            {scanPhase === 'done' && schemaSnapshot && (() => {
+              const totalCols = Object.values(schemaSnapshot.entities).reduce((s, e) => s + e.attributes.length, 0)
+              const entitiesWithCols = Object.values(schemaSnapshot.entities).filter(e => e.attributes.length > 0).length
+              const optionSets = schemaSnapshot.globalOptionSets.length
+              return (
+                <div className={styles.scanSummary}>
+                  <span>✓ Schema scanned — {totalCols} custom column{totalCols !== 1 ? 's' : ''} across {entitiesWithCols} entit{entitiesWithCols !== 1 ? 'ies' : 'y'}, {optionSets} global option set{optionSets !== 1 ? 's' : ''}</span>
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    onClick={runScan}
+                    style={{ marginLeft: 'auto' }}
+                  >
+                    Refresh
+                  </Button>
+                </div>
+              )
+            })()}
+
+            {scanPhase === 'error' && (
+              <MessageBar intent="error">
+                <MessageBarBody>
+                  Schema scan failed: {scanError}
+                  <Button appearance="subtle" size="small" onClick={runScan} style={{ marginLeft: '8px' }}>
+                    Retry
+                  </Button>
+                </MessageBarBody>
+              </MessageBar>
+            )}
+          </>
         )}
       </div>
 

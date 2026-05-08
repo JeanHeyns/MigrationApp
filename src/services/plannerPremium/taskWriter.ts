@@ -15,6 +15,10 @@ export interface TaskWriteResult {
 /**
  * Rebuilds project schedules through Project schedule OperationSets.
  * Existing assignments, dependencies, and tasks are cleared before tasks are recreated.
+ *
+ * Task custom fields are NOT migrated — neither in full nor in dataOnly mode.
+ * The OperationSet PSS API does not accept custom field values on msdyn_projecttask,
+ * and post-creation PATCH on locked task entities is not supported.
  */
 export async function writeTasks(
   tasks: PoTask[],

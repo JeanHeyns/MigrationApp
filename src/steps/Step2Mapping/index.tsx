@@ -15,9 +15,10 @@ import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import { fetchEntityAttributes, fetchEntityDefinitions, fetchSolutionEntityIds, type DvEntityAttribute, type DvEntityDefinition } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
-import type { PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
+import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
 import type { DataverseColumnType, FieldMapping, MappingConfiguration, OwnerMapping } from '../../models/mapping.types'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
+import type { ColumnMeta, ColumnMetaType, EntitySchema, ResolverEntry, ResolverPlan, SchemaSnapshot } from '../../models/dataOnly.types'
 
 // ─── Type mappings ────────────────────────────────────────────────────────────
 
@@ -88,6 +89,119 @@ const ENTITY_COLORS: Record<string, string> = {
   Project:  '#0078d4',
   Task:     '#498205',
   Resource: '#7719aa',
+}
+
+// ─── dataOnly mode constants ───────────────────────────────────────────────────
+
+const PO_ENTITY_TO_DV: Record<string, string> = {
+  Project:  'msdyn_project',
+  Task:     'msdyn_projecttask',
+  Resource: 'msdyn_projectteam',
+}
+
+const PO_TO_SCHEMA_TYPES: Record<string, ColumnMetaType[]> = {
+  Text:        ['String', 'Memo'],
+  Number:      ['Integer', 'Decimal', 'Money'],
+  Cost:        ['Money', 'Decimal'],
+  Duration:    ['Integer', 'Decimal'],
+  Date:        ['DateTime'],
+  Flag:        ['Boolean'],
+  Lookup:      ['Picklist', 'Lookup'],
+  LookupMulti: ['MultiSelectPicklist'],
+}
+
+const SCHEMA_TYPE_TO_DV_TYPE: Partial<Record<ColumnMetaType, DataverseColumnType>> = {
+  String:               'Text',
+  Memo:                 'Memo',
+  Integer:              'Integer',
+  Decimal:              'Decimal',
+  Money:                'Currency',
+  DateTime:             'DateTime',
+  Boolean:              'Boolean',
+  Picklist:             'OptionSet',
+  MultiSelectPicklist:  'MultiSelectOptionSet',
+  Lookup:               'Lookup',
+}
+
+// ─── dataOnly helpers ─────────────────────────────────────────────────────────
+
+function getCompatibleColumns(dvEntity: EntitySchema, poType: string): ColumnMeta[] {
+  const compatible = PO_TO_SCHEMA_TYPES[poType] ?? []
+  return dvEntity.attributes.filter(a => compatible.includes(a.type))
+}
+
+function autoMatchColumn(cf: PoCustomField, compatible: ColumnMeta[], prefix: string): ColumnMeta | null {
+  const logicalName = toLogicalName(cf.CustomFieldName, prefix)
+  const byLogical = compatible.find(c => c.logicalName === logicalName)
+  if (byLogical) return byLogical
+  const displayLower = cf.CustomFieldName.toLowerCase()
+  return compatible.find(c => c.displayName.toLowerCase() === displayLower) ?? null
+}
+
+function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, prefix: string): FieldMapping[] {
+  return data.customFields.map(cf => {
+    const dvEntityKey = PO_ENTITY_TO_DV[cf.CustomFieldEntityType]
+    const dvEntity = dvEntityKey ? snapshot.entities[dvEntityKey] : undefined
+    const compatible = dvEntity ? getCompatibleColumns(dvEntity, cf.CustomFieldType) : []
+
+    if (compatible.length === 0) {
+      return {
+        customField: cf,
+        targetColumnType: SUGGESTED_DV_TYPE[cf.CustomFieldType],
+        targetLogicalName: toLogicalName(cf.CustomFieldName, prefix),
+        skip: true,
+        migrateValue: false,
+        useExistingField: false,
+      }
+    }
+
+    const matched = autoMatchColumn(cf, compatible, prefix)
+    if (matched) {
+      return {
+        customField: cf,
+        targetColumnType: SCHEMA_TYPE_TO_DV_TYPE[matched.type] ?? SUGGESTED_DV_TYPE[cf.CustomFieldType],
+        targetLogicalName: matched.logicalName,
+        skip: false,
+        migrateValue: true,
+        useExistingField: true,
+        matchSource: 'auto' as const,
+      }
+    }
+
+    return {
+      customField: cf,
+      targetColumnType: SUGGESTED_DV_TYPE[cf.CustomFieldType],
+      targetLogicalName: toLogicalName(cf.CustomFieldName, prefix),
+      skip: false,
+      migrateValue: false,
+      useExistingField: false,
+    }
+  })
+}
+
+function buildResolverPlanFromMappings(mappings: FieldMapping[], snapshot: SchemaSnapshot): ResolverPlan {
+  const fields: ResolverEntry[] = []
+  for (const m of mappings) {
+    if (m.skip || !m.useExistingField || !m.targetLogicalName) continue
+    const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
+    const dvEntity = dvEntityKey ? snapshot.entities[dvEntityKey] : undefined
+    if (!dvEntity) continue
+    const col = dvEntity.attributes.find(a => a.logicalName === m.targetLogicalName)
+    if (!col) continue
+    const targetEntity = col.targets?.[0]
+    const targetEntityObj = targetEntity ? snapshot.entities[targetEntity] : undefined
+    fields.push({
+      poFieldName:      m.customField.ODataFieldName ?? m.customField.CustomFieldName,
+      dvLogicalName:    m.targetLogicalName,
+      dvType:           col.type,
+      optionSetName:    col.optionSetName,
+      targetEntity,
+      targetEntitySet:  targetEntityObj?.entitySetName,
+      primaryNameField: targetEntityObj?.primaryNameField,
+      navigationProperty: col.navigationProperty,
+    })
+  }
+  return { fields }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -223,7 +337,8 @@ export function Step2Mapping() {
   const styles = useStyles()
   const {
     fetchedData, mappingConfig, setMappingConfig, nextStep, prevStep,
-    selectedSolution, skipColumnCreation, setSkipColumnCreation, dataSource,
+    selectedSolution, skipColumnCreation, dataSource,
+    migrationMode, schemaSnapshot, setResolverPlan, setMigrationMode,
   } = useMigration()
 
   const prefix = selectedSolution?.publisherPrefix ?? 'cr9a1'
@@ -237,20 +352,26 @@ export function Step2Mapping() {
   const [solutionEntityIds, setSolutionEntityIds] = useState<Set<string>>(new Set())
   const [loadingUsers, setLoadingUsers] = useState(false)
   const [userLoadError, setUserLoadError] = useState<string | null>(null)
+  const [loadWarning, setLoadWarning] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Initialise mappings from fetched data (or restore from context)
-  // Re-runs when selectedSolution changes so logical names use the correct prefix
+  // Initialise mappings from fetched data (or restore from context).
+  // In dataOnly mode, re-init when schemaSnapshot becomes available.
+  // mappingConfig intentionally excluded — loadJson handler sets it directly.
   useEffect(() => {
     if (!fetchedData) return
     if (mappingConfig) {
       setFieldMappings(mappingConfig.fieldMappings)
       setOwnerMappings(mappingConfig.ownerMappings)
-    } else {
+      return
+    }
+    if (migrationMode === 'dataOnly' && schemaSnapshot) {
+      setFieldMappings(buildDataOnlyMappings(fetchedData, schemaSnapshot, prefix))
+    } else if (migrationMode === 'full') {
       setFieldMappings(buildInitialMappings(fetchedData, prefix))
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchedData, mappingConfig, prefix])
+  }, [fetchedData, prefix, migrationMode, schemaSnapshot])
 
   // Load existing msdyn_project attributes for "map to existing field" dropdown
   useEffect(() => {
@@ -349,6 +470,23 @@ export function Step2Mapping() {
     }))
   }
 
+  function setFieldExistingDataOnly(idx: number, logicalName: string, col: ColumnMeta | undefined) {
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      if (!logicalName) {
+        return { ...m, useExistingField: false, matchSource: undefined, migrateValue: false }
+      }
+      return {
+        ...m,
+        targetLogicalName: logicalName,
+        targetColumnType: (col ? SCHEMA_TYPE_TO_DV_TYPE[col.type] : undefined) ?? m.targetColumnType,
+        useExistingField: true,
+        migrateValue: true,
+        matchSource: 'manual' as const,
+      }
+    }))
+  }
+
   function setFieldUseExisting(idx: number, useExisting: boolean) {
     setFieldMappings(prev => prev.map((m, i) => {
       if (i !== idx) return m
@@ -385,6 +523,7 @@ export function Step2Mapping() {
       siteUrl: fetchedData?.pwaUrl ?? '',
       publisherPrefix: prefix,
       skipColumnCreation,
+      migrationMode,
       fieldMappings,
       ownerMappings,
       savedAt: new Date().toISOString(),
@@ -407,8 +546,12 @@ export function Step2Mapping() {
         const config = JSON.parse(ev.target?.result as string) as MappingConfiguration
         setFieldMappings(config.fieldMappings)
         setOwnerMappings(config.ownerMappings)
-        if (config.skipColumnCreation !== undefined) {
-          setSkipColumnCreation(config.skipColumnCreation)
+        const loadedMode = config.migrationMode ?? 'full'
+        setMigrationMode(loadedMode)
+        if (loadedMode === 'dataOnly' && !schemaSnapshot) {
+          setLoadWarning('Loaded a data-only mapping — go back to Step 1, select a solution and run the schema scan before proceeding.')
+        } else {
+          setLoadWarning(null)
         }
       } catch {
         alert('Invalid mapping file.')
@@ -420,7 +563,19 @@ export function Step2Mapping() {
 
   function handleRedetectTypes() {
     if (!fetchedData) return
-    setFieldMappings(buildInitialMappings(fetchedData, prefix))
+    if (migrationMode === 'dataOnly' && schemaSnapshot) {
+      setFieldMappings(buildDataOnlyMappings(fetchedData, schemaSnapshot, prefix))
+    } else {
+      setFieldMappings(buildInitialMappings(fetchedData, prefix))
+    }
+  }
+
+  function scrollToFirstUnmapped() {
+    const first = unmappedDataOnlyRows[0]
+    if (first) {
+      document.getElementById(`mapping-row-${first.customField.CustomFieldId}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
   }
 
   // ── Next step ─────────────────────────────────────────────────────────────
@@ -435,12 +590,24 @@ export function Step2Mapping() {
       savedAt: new Date().toISOString(),
     }
     setMappingConfig(config)
+    if (migrationMode === 'dataOnly' && schemaSnapshot) {
+      setResolverPlan(buildResolverPlanFromMappings(fieldMappings, schemaSnapshot))
+    }
     nextStep()
   }
 
   const activeFields = fieldMappings.filter(m => !m.skip)
   const migratingFields = fieldMappings.filter(m => !m.skip && m.migrateValue)
   const unmatchedOwners = ownerMappings.filter(m => !m.matched)
+  const unmappedDataOnlyRows = migrationMode === 'dataOnly' && schemaSnapshot
+    ? fieldMappings.filter(m => {
+        if (m.skip) return false
+        const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
+        const dvEntity = dvEntityKey ? schemaSnapshot.entities[dvEntityKey] : undefined
+        const compat = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
+        return compat.length > 0 && !(m.useExistingField && m.targetLogicalName)
+      })
+    : []
 
   return (
     <div className={styles.root}>
@@ -473,16 +640,18 @@ export function Step2Mapping() {
             {prefix}_
           </code>
         </span>
-        <Checkbox
-          label="Skip column creation (columns already exist in Dataverse)"
-          checked={skipColumnCreation}
-          onChange={(_, d) => setSkipColumnCreation(!!d.checked)}
-        />
+        {migrationMode === 'dataOnly' && (
+          <span style={{ fontSize: '12px', color: '#107c10', fontWeight: '600' }}>
+            Data only — mapping to existing schema
+          </span>
+        )}
       </div>
 
       {/* ── Toolbar ── */}
       <div className={styles.toolbar}>
-        <Button size="small" onClick={handleRedetectTypes}>Re-detect column types</Button>
+        <Button size="small" onClick={handleRedetectTypes}>
+          {migrationMode === 'dataOnly' ? 'Re-scan existing columns' : 'Re-detect column types'}
+        </Button>
         <Button size="small" onClick={handleSaveJson}>Save mapping as JSON</Button>
         <Button size="small" onClick={() => fileInputRef.current?.click()}>Load mapping from JSON</Button>
         <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleLoadJson} />
@@ -510,7 +679,9 @@ export function Step2Mapping() {
               <th className={styles.th}>Field Name</th>
               <th className={styles.th} style={{ whiteSpace: 'nowrap' }}>PO Type</th>
               <th className={styles.th}>Dataverse Target</th>
-              <th className={styles.th} style={{ width: '88px', textAlign: 'center' }}>Migrate value</th>
+              {migrationMode !== 'dataOnly' && (
+                <th className={styles.th} style={{ width: '88px', textAlign: 'center' }}>Migrate value</th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -522,7 +693,11 @@ export function Step2Mapping() {
               </tr>
             )}
             {fieldMappings.map((m, idx) => (
-              <tr key={m.customField.CustomFieldId} className={m.skip ? styles.trSkipped : undefined}>
+              <tr
+                key={m.customField.CustomFieldId}
+                id={`mapping-row-${m.customField.CustomFieldId}`}
+                className={m.skip ? styles.trSkipped : undefined}
+              >
 
                 {/* Col 1: Skip */}
                 <td className={styles.td}>
@@ -533,6 +708,14 @@ export function Step2Mapping() {
                 <td className={styles.td}>
                   <div className={styles.fieldNameCell}>
                     <div className={styles.fieldNameBadgeRow}>
+                      {migrationMode === 'dataOnly' && !m.skip && (() => {
+                        const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
+                        const dvEntity = dvEntityKey ? schemaSnapshot?.entities[dvEntityKey] : undefined
+                        const compatible = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
+                        if (compatible.length === 0) return <span title="No compatible column in schema">🔴</span>
+                        if (m.useExistingField && m.targetLogicalName) return <span title={m.matchSource === 'auto' ? 'Auto-matched' : 'Mapped'}>🟢</span>
+                        return <span title="Manual selection required">🟡</span>
+                      })()}
                       <strong style={{ fontSize: '13px' }}>{m.customField.CustomFieldName}</strong>
                       <span
                         className={styles.entityBadge}
@@ -550,106 +733,140 @@ export function Step2Mapping() {
                   {m.customField.CustomFieldType}
                 </td>
 
-                {/* Col 4: Dataverse Target — mode toggle + conditional selector */}
+                {/* Col 4: Dataverse Target */}
                 <td className={styles.td}>
                   {m.skip
                     ? <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
-                    : <>
-                        <div className={styles.modeToggle}>
-                          <button
-                            className={styles.modeLink}
-                            disabled={!m.useExistingField}
-                            style={{
-                              color: !m.useExistingField ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground3,
-                              fontWeight: !m.useExistingField ? '600' : '400',
-                            }}
-                            onClick={() => setFieldUseExisting(idx, false)}
-                          >
-                            New column
-                          </button>
-                          <button
-                            className={styles.modeLink}
-                            disabled={m.useExistingField}
-                            style={{
-                              color: m.useExistingField ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground3,
-                              fontWeight: m.useExistingField ? '600' : '400',
-                            }}
-                            onClick={() => setFieldUseExisting(idx, true)}
-                          >
-                            Use existing
-                          </button>
-                        </div>
-                        {!m.useExistingField
-                          ? <>
-                              <Select
-                                size="small"
-                                className={styles.selectFixed}
-                                value={m.targetColumnType}
-                                title={DV_TYPE_LABELS[m.targetColumnType]}
-                                onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
-                              >
-                                {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
-                                  <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
-                                ))}
-                              </Select>
-                              {m.targetColumnType === 'Lookup' && (
-                                <Select
-                                  size="small"
-                                  className={styles.selectFixed}
-                                  value={m.relatedEntity?.logicalName ?? ''}
-                                  title={dvEntities.find(e => e.logicalName === m.relatedEntity?.logicalName)?.displayName ?? ''}
-                                  onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
-                                  style={{ marginTop: '6px' }}
-                                >
-                                  <option value="">— pick related table —</option>
-                                  {dvEntities
-                                    .filter(e => !solutionEntityIds.size || solutionEntityIds.has((e.metadataId ?? '').toLowerCase().replace(/[{}]/g, '')))
-                                    .map(e => (
-                                      <option key={e.logicalName} value={e.logicalName} title={`${e.displayName} (${e.logicalName})`}>
-                                        {e.displayName} ({e.logicalName})
-                                      </option>
-                                    ))}
-                                </Select>
-                              )}
-                              {m.targetColumnType !== 'Lookup' && m.lookupTable && (
-                                <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
-                                  {m.lookupTable.LookupTableName} · {m.lookupTable.entries.length} entries
-                                </div>
-                              )}
-                            </>
-                          : <Select
+                    : migrationMode === 'dataOnly'
+                      ? (() => {
+                          const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
+                          const dvEntity = dvEntityKey ? schemaSnapshot?.entities[dvEntityKey] : undefined
+                          const compatible = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
+                          if (compatible.length === 0) {
+                            return (
+                              <span style={{ fontSize: '12px', color: '#a4262c' }}>
+                                No compatible {m.customField.CustomFieldType} column in {dvEntityKey ?? 'entity'}.
+                                {' '}Create it manually in Dataverse or switch to Full mode in Step 1.
+                              </span>
+                            )
+                          }
+                          return (
+                            <Select
                               size="small"
                               className={styles.selectFixed}
                               value={m.useExistingField ? m.targetLogicalName : ''}
-                              title={dvAttributes.find(a => a.logicalName === m.targetLogicalName)?.displayName ?? ''}
                               onChange={(_, d) => {
-                                const attr = dvAttributes.find(a => a.logicalName === d.value)
-                                setFieldExistingMapping(idx, d.value, attr?.attributeType ?? '')
+                                const col = compatible.find(c => c.logicalName === d.value)
+                                setFieldExistingDataOnly(idx, d.value, col)
                               }}
                             >
-                              <option value="">— select existing field —</option>
-                              {dvAttributes
-                                .filter(a => PO_COMPATIBLE_ATTR_TYPES[m.customField.CustomFieldType]?.includes(a.attributeType))
-                                .map(a => (
-                                  <option key={a.logicalName} value={a.logicalName} title={`${a.displayName} (${a.logicalName})`}>
-                                    {a.displayName} ({a.logicalName})
-                                  </option>
-                                ))
-                              }
+                              <option value="">— select existing column —</option>
+                              {compatible.map(col => (
+                                <option key={col.logicalName} value={col.logicalName} title={`${col.displayName} (${col.logicalName})`}>
+                                  {col.displayName} ({col.logicalName})
+                                </option>
+                              ))}
                             </Select>
-                        }
-                      </>
+                          )
+                        })()
+                      : <>
+                          <div className={styles.modeToggle}>
+                            <button
+                              className={styles.modeLink}
+                              disabled={!m.useExistingField}
+                              style={{
+                                color: !m.useExistingField ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground3,
+                                fontWeight: !m.useExistingField ? '600' : '400',
+                              }}
+                              onClick={() => setFieldUseExisting(idx, false)}
+                            >
+                              New column
+                            </button>
+                            <button
+                              className={styles.modeLink}
+                              disabled={m.useExistingField}
+                              style={{
+                                color: m.useExistingField ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground3,
+                                fontWeight: m.useExistingField ? '600' : '400',
+                              }}
+                              onClick={() => setFieldUseExisting(idx, true)}
+                            >
+                              Use existing
+                            </button>
+                          </div>
+                          {!m.useExistingField
+                            ? <>
+                                <Select
+                                  size="small"
+                                  className={styles.selectFixed}
+                                  value={m.targetColumnType}
+                                  title={DV_TYPE_LABELS[m.targetColumnType]}
+                                  onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
+                                >
+                                  {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
+                                    <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
+                                  ))}
+                                </Select>
+                                {m.targetColumnType === 'Lookup' && (
+                                  <Select
+                                    size="small"
+                                    className={styles.selectFixed}
+                                    value={m.relatedEntity?.logicalName ?? ''}
+                                    title={dvEntities.find(e => e.logicalName === m.relatedEntity?.logicalName)?.displayName ?? ''}
+                                    onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
+                                    style={{ marginTop: '6px' }}
+                                  >
+                                    <option value="">— pick related table —</option>
+                                    {dvEntities
+                                      .filter(e => !solutionEntityIds.size || solutionEntityIds.has((e.metadataId ?? '').toLowerCase().replace(/[{}]/g, '')))
+                                      .map(e => (
+                                        <option key={e.logicalName} value={e.logicalName} title={`${e.displayName} (${e.logicalName})`}>
+                                          {e.displayName} ({e.logicalName})
+                                        </option>
+                                      ))}
+                                  </Select>
+                                )}
+                                {m.targetColumnType !== 'Lookup' && m.lookupTable && (
+                                  <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                                    {m.lookupTable.LookupTableName} · {m.lookupTable.entries.length} entries
+                                  </div>
+                                )}
+                              </>
+                            : <Select
+                                size="small"
+                                className={styles.selectFixed}
+                                value={m.useExistingField ? m.targetLogicalName : ''}
+                                title={dvAttributes.find(a => a.logicalName === m.targetLogicalName)?.displayName ?? ''}
+                                onChange={(_, d) => {
+                                  const attr = dvAttributes.find(a => a.logicalName === d.value)
+                                  setFieldExistingMapping(idx, d.value, attr?.attributeType ?? '')
+                                }}
+                              >
+                                <option value="">— select existing field —</option>
+                                {dvAttributes
+                                  .filter(a => PO_COMPATIBLE_ATTR_TYPES[m.customField.CustomFieldType]?.includes(a.attributeType))
+                                  .map(a => (
+                                    <option key={a.logicalName} value={a.logicalName} title={`${a.displayName} (${a.logicalName})`}>
+                                      {a.displayName} ({a.logicalName})
+                                    </option>
+                                  ))
+                                }
+                              </Select>
+                          }
+                        </>
                   }
                 </td>
 
                 {/* Col 5: Migrate value */}
-                <td className={styles.td} style={{ textAlign: 'center' }}>
-                  <Checkbox
-                    checked={m.migrateValue}
-                    disabled={m.skip || m.customField.CustomFieldEntityType === 'Task'}
-                    onChange={(_, d) => setFieldMigrateValue(idx, !!d.checked)}
-                  />
-                </td>
+                {migrationMode !== 'dataOnly' && (
+                  <td className={styles.td} style={{ textAlign: 'center' }}>
+                    <Checkbox
+                      checked={m.migrateValue}
+                      disabled={m.skip || m.customField.CustomFieldEntityType === 'Task'}
+                      onChange={(_, d) => setFieldMigrateValue(idx, !!d.checked)}
+                    />
+                  </td>
+                )}
 
               </tr>
             ))}
@@ -726,11 +943,43 @@ export function Step2Mapping() {
         )}
       </div>
 
+      {/* ── dataOnly no-snapshot warning ── */}
+      {migrationMode === 'dataOnly' && !schemaSnapshot && (
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            No schema loaded. Go back to Step 1, select a solution and run the schema scan.
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
+      {/* ── loadWarning (after JSON load) ── */}
+      {loadWarning && (
+        <MessageBar intent="warning">
+          <MessageBarBody>{loadWarning}</MessageBarBody>
+        </MessageBar>
+      )}
+
+      {/* ── unmapped fields warning ── */}
+      {migrationMode === 'dataOnly' && unmappedDataOnlyRows.length > 0 && (
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            {unmappedDataOnlyRows.length} field{unmappedDataOnlyRows.length !== 1 ? 's have' : ' has'} no column selected and will be skipped during migration.
+            {' '}Check the Skip box to confirm, or{' '}
+            <button
+              onClick={scrollToFirstUnmapped}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: '2px', padding: 0, fontSize: 'inherit', color: 'inherit' }}
+            >
+              scroll to first unmapped field
+            </button>.
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
       {/* ── Footer ── */}
       <div className={styles.footer}>
         <Button onClick={prevStep}>← Back</Button>
         <Button appearance="primary" onClick={handleNext} disabled={activeFields.length === 0}>
-          Next: Create Columns →
+          {migrationMode === 'dataOnly' ? 'Next: Validate Schema →' : 'Next: Create Columns →'}
         </Button>
       </div>
     </div>

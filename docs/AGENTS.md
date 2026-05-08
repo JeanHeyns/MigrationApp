@@ -1,19 +1,16 @@
 <claude-mem-context>
 # Memory Context
 
-# [project-online-migrator] recent context, 2026-05-04 6:41pm GMT+2
+# [project-online-migrator] recent context, 2026-05-04 6:57pm GMT+2
 
 Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision 🚨security_alert 🔐security_note
 Format: ID TIME TYPE TITLE
 Fetch details: get_observations([IDs]) | Search: mem-search skill
 
-Stats: 50 obs (15,736t read) | 417,211t work | 96% savings
+Stats: 50 obs (15,704t read) | 459,388t work | 97% savings
 
 ### May 4, 2026
-24 1:59p 🟣 Implement Step 3 Create Columns scaffold
-25 " 🟣 Implement Step 4 Import Data scaffold
-26 " 🟣 Implement Step 5 Validation Report scaffold
-27 " 🔄 Replace App.tsx with migration wizard shell
+27 1:59p 🔄 Replace App.tsx with migration wizard shell
 28 2:04p 🔵 Deprecated inlineDynamicImports option in build configuration
 29 2:06p ✅ Migration wizard app deployed to Power Apps dev environment
 30 2:09p 🟣 Implement Step 2 Field & Owner Mapping UI
@@ -52,8 +49,6 @@ Stats: 50 obs (15,736t read) | 417,211t work | 96% savings
 64 3:19p 🔵 Located existing createRecord implementation in dataverseService
 65 " 🔵 Found createRecord implementation pattern in dataverseService
 66 3:33p 🔵 pac@1.0.0 Node.js v24.14.0 incompatibility is systemic across all shells
-S24 Push code to https://dev-jehe.crm4.dynamics.com/ - implemented Step 4 (Import Data) functionality for Project Online to Dynamics migration tool (May 4, 4:03 PM)
-S25 Fix resource identifier handling and Dataverse payload issues in Project Online migrator import logic (May 4, 4:09 PM)
 S26 Fix bookable resource linking and task outline number handling in Dataverse API payloads (May 4, 4:11 PM)
 S27 Design approach for handling task imports to existing projects in Step 4 - rebuild schedule vs. incremental matching (May 4, 4:13 PM)
 S28 Implement and deploy schedule rebuild strategy for project task imports (May 4, 4:14 PM)
@@ -69,15 +64,12 @@ S32 Implement Step 5 Validation Report component for Project Online migrator wit
 77 4:33p ✅ Improved default value fallbacks for option set fields
 78 " ✅ Removed custom field payload from task import
 80 4:36p 🟣 Exclude Project Online summary task from migration
-S33 Code review and improvement suggestions for Project Online to Dataverse migration tool (May 4, 6:29 PM)
-**Investigated**: Examined full codebase structure including: custom field type detection (customFields.ts), data import orchestration (Step4Import), schedule API writers (taskWriter, assignmentWriter, projectWriter, resourceWriter), Dataverse service layer (dataverseService.ts, odataClient.ts), and UI steps. Performed targeted searches for error handling, TODOs, type safety issues, and architectural patterns.
+S33 Code review and improvement suggestions for Project Online to Dataverse migration tool (May 4, 5:05 PM)
+S34 Fix OperationSet reporting, add migration tracking, and improve Dataverse robustness; check git connectivity for pushing code (May 4, 6:29 PM)
+81 6:44p 🔵 Git push rejected due to existing remote content
+S35 Push Project Online migrator code to GitHub repository (JeanHeyns/MigrationApp) (May 4, 6:50 PM)
+82 6:54p 🟣 Added confirmation checkpoint for destructive schedule rebuild in Step 4
+83 " ✅ Rewrote README with comprehensive runbook and known behavior documentation
 
-**Learned**: Fixed custom field type enumeration mapping: Project Server uses non-sequential enum codes (4=Date, 6=Duration, 9=Cost, 15=Number, 17=Flag, 21=Text). Schedule API batch operations queue changes via OperationSet but mark items success before ExecuteOperationSet commits them. Project matching uses only name, creating risk of collisions. Dataverse record listing does not implement pagination beyond $top parameter. Bucket lookup hardcodes "Bucket 1" name which breaks in localized environments.
-
-**Completed**: Fixed custom field type detection in customFields.ts with correct enum mapping and added PS_TYPE_NAME_MAP for name-based fallback. Added helper functions (readLookupTableId, readFieldTypeCode, readFieldTypeName) for robust parsing of mixed-format field metadata. Added "Re-detect column types" button to Step2Mapping UI. Fixed TypeScript null safety in Step2Mapping. Build passes successfully. App deployed to dev-jehe Dataverse environment.
-
-**Next Steps**: Comprehensive code review identified 8 actionable improvements ranked by severity: (1) Fix success-reporting timing in task/assignment writers to report success only after OperationSet execution, (2) Add migration ID columns (exerti_projectonlineid) to enable safe project/task/resource matching, (3) Make clearSchedule operation safer with preflight validation, (4) Implement Dataverse pagination with skiptoken/nextLink, (5) Make bucket discovery resilient (use first bucket or create via API), (6) Hide Resource custom fields from Step 2 until bookableresource support added, (7) Move hardcoded environment URL to config/context, (8) Refactor schedule API payloads into typed builders with documentation.
-
-
-Access 417k tokens of past work via get_observations([IDs]) or mem-search skill.
+Access 459k tokens of past work via get_observations([IDs]) or mem-search skill.
 </claude-mem-context>

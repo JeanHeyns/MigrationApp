@@ -5,6 +5,7 @@
  */
 import { client } from '../client'
 import { DATAVERSE_ORG_URL } from '../config/environment'
+import type { GlobalOptionSetMeta } from '../models/dataOnly.types'
 
 const ORG_URL = DATAVERSE_ORG_URL
 
@@ -79,6 +80,51 @@ function extractSkipToken(nextLink: string): string | undefined {
     const match = nextLink.match(/[?&]\$skiptoken=([^&]+)/)
     return match ? decodeURIComponent(match[1]) : undefined
   }
+}
+
+export async function listAllRecords(
+  entitySetName: string,
+  selectFields: string[],
+  options?: { pageSize?: number; maxRecords?: number },
+): Promise<Record<string, unknown>[]> {
+  const pageSize = options?.pageSize ?? 5000
+  const maxRecords = options?.maxRecords ?? Infinity
+  const rows: Record<string, unknown>[] = []
+  let skiptoken: string | undefined
+
+  while (rows.length < maxRecords) {
+    const batchSize = isFinite(maxRecords)
+      ? Math.min(pageSize, maxRecords - rows.length)
+      : pageSize
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const params: Record<string, any> = {
+      organization: ORG_URL,
+      entityName: entitySetName,
+      prefer: 'odata.include-annotations=*',
+      accept: 'application/json',
+      $top: batchSize,
+      $select: selectFields.join(','),
+    }
+    if (skiptoken) params['$skiptoken'] = skiptoken
+
+    const res = await client.executeAsync<typeof params, ListResult>({
+      connectorOperation: {
+        tableName: 'commondataserviceforapps',
+        operationName: 'ListRecordsWithOrganization',
+        parameters: params,
+      },
+    })
+
+    if (!res.success) throw new Error(extractDvError(res))
+    const data = (res.data ?? {}) as ListResult
+    rows.push(...((data.value ?? []) as Record<string, unknown>[]))
+
+    const nextLink = data['@odata.nextLink'] ?? data['odata.nextLink']
+    skiptoken = nextLink ? extractSkipToken(nextLink) : undefined
+    if (!skiptoken || (data.value ?? []).length === 0) break
+  }
+
+  return rows
 }
 
 export async function createRecord(
@@ -317,6 +363,180 @@ export async function fetchEntityAttributes(entityLogicalName: string): Promise<
       attributeType: (a.AttributeType ?? '') as string,
     }))
     .filter(a => a.logicalName && !EXCLUDED_ATTR_TYPES.has(a.attributeType))
+}
+
+// ─── Schema inspection helpers ────────────────────────────────────────────────
+
+export interface EntityWithCustomAttributes {
+  logicalName: string
+  entitySetName: string
+  primaryNameField: string
+  rawAttrs: Array<{
+    LogicalName: string
+    DisplayName?: { UserLocalizedLabel?: { Label?: string } }
+    AttributeType: string
+    AttributeTypeName?: { Value?: string }
+  }>
+}
+
+export async function fetchEntityWithCustomAttributes(entityLogicalName: string): Promise<EntityWithCustomAttributes> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    entityLogicalName,
+    '$select': 'LogicalName,EntitySetName,PrimaryNameAttribute',
+    '$expand': 'Attributes($filter=IsCustomAttribute eq true;$select=LogicalName,DisplayName,AttributeType,AttributeTypeName)',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'GetEntityDefinition',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = res.data as any
+  return {
+    logicalName:      (raw?.LogicalName ?? entityLogicalName) as string,
+    entitySetName:    (raw?.EntitySetName ?? `${entityLogicalName}s`) as string,
+    primaryNameField: (raw?.PrimaryNameAttribute ?? 'name') as string,
+    rawAttrs:         (raw?.Attributes ?? []) as EntityWithCustomAttributes['rawAttrs'],
+  }
+}
+
+interface RawAttributeMeta {
+  LogicalName: string
+  DisplayName?: { UserLocalizedLabel?: { Label?: string } }
+  AttributeType: string
+  AttributeTypeName?: { Value?: string }
+}
+
+export async function fetchCustomEntityAttributes(entityLogicalName: string): Promise<RawAttributeMeta[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    entityLogicalName,
+    '$filter': 'IsCustomAttribute eq true',
+    '$select': 'LogicalName,DisplayName,AttributeType,AttributeTypeName',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'GetEntityAttributes',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (((res.data as any)?.value ?? []) as RawAttributeMeta[])
+}
+
+interface RawPicklistAttributeMeta {
+  LogicalName: string
+  OptionSet?: { Name?: string; IsGlobal?: boolean }
+}
+
+async function fetchAttributesByCast(
+  entityLogicalName: string,
+  attributeCast: string,
+): Promise<RawPicklistAttributeMeta[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    entityLogicalName,
+    attributeCast,
+    '$filter': 'IsCustomAttribute eq true',
+    '$select': 'LogicalName',
+    '$expand': 'OptionSet($select=Name,IsGlobal)',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'GetEntityAttributesByCast',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (((res.data as any)?.value ?? []) as RawPicklistAttributeMeta[])
+}
+
+export function fetchCustomPicklistAttributes(entityLogicalName: string) {
+  return fetchAttributesByCast(entityLogicalName, 'Microsoft.Dynamics.CRM.PicklistAttributeMetadata')
+}
+
+export function fetchCustomMultiPicklistAttributes(entityLogicalName: string) {
+  return fetchAttributesByCast(entityLogicalName, 'Microsoft.Dynamics.CRM.MultiSelectPicklistAttributeMetadata')
+}
+
+interface RawRelationshipMeta {
+  ReferencingAttribute: string
+  ReferencingEntityNavigationPropertyName: string
+  ReferencedEntity: string
+}
+
+export async function fetchEntityManyToOneRelationships(entityLogicalName: string): Promise<RawRelationshipMeta[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    accept: 'application/json',
+    entityLogicalName,
+    '$select': 'ReferencingAttribute,ReferencingEntityNavigationPropertyName,ReferencedEntity',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'GetEntityManyToOneRelationships',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (((res.data as any)?.value ?? []) as RawRelationshipMeta[])
+}
+
+export async function fetchGlobalOptionSetFull(name: string): Promise<GlobalOptionSetMeta | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const params: Record<string, any> = {
+      organization: ORG_URL,
+      accept: 'application/json',
+      optionSetName: name,
+    }
+
+    const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+      connectorOperation: {
+        tableName: 'commondataserviceforapps',
+        operationName: 'GetGlobalOptionSetByName',
+        parameters: params,
+      },
+    })
+
+    if (!res.success) return null
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = res.data as any
+    const displayName = (raw?.DisplayName?.UserLocalizedLabel?.Label ?? name) as string
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const options = ((raw?.Options ?? []) as any[]).map(o => ({
+      value: o.Value as number,
+      label: (o.Label?.UserLocalizedLabel?.Label ?? String(o.Value)) as string,
+    }))
+    return { name, displayName, options }
+  } catch {
+    return null
+  }
 }
 
 // ─── Test ─────────────────────────────────────────────────────────────────────

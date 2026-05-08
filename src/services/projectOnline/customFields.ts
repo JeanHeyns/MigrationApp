@@ -107,6 +107,6 @@ export async function fetchCustomFields(siteUrl: string): Promise<PoCustomField[
     CustomFieldType:         resolveFieldType(cf),
     CustomFieldTypeValue:    readFieldTypeCode(cf) ?? 0,
     CustomFieldLookupTableUID: readLookupTableId(cf),
-    ODataFieldName:          cf.InternalName ?? (cf.Name ?? cf.CustomFieldName ?? '').replace(/[^a-zA-Z0-9]/g, ''),
+    ODataFieldName:          (cf.Name ?? cf.CustomFieldName ?? '').replace(/[^a-zA-Z0-9]/g, ''),
   })) satisfies PoCustomField[]
 }

@@ -70,7 +70,7 @@ const LEVEL_PREFIX: Record<LogLine['level'], string> = {
 
 export function Step3CreateColumns() {
   const styles = useStyles()
-  const { mappingConfig, selectedSolution, setOptionSetMappings, nextStep, prevStep } = useMigration()
+  const { mappingConfig, selectedSolution, setOptionSetMappings, nextStep, prevStep, migrationMode } = useMigration()
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [logLines, setLogLines] = useState<LogLine[]>([])
@@ -79,7 +79,7 @@ export function Step3CreateColumns() {
   const [errorCount, setErrorCount] = useState(0)
   const logRef = useRef<HTMLDivElement>(null)
 
-  const skip = mappingConfig?.skipColumnCreation ?? false
+  const skip = migrationMode === 'dataOnly'
   const activeMappings = mappingConfig?.fieldMappings.filter(f => !f.skip) ?? []
   const lookupMappings = activeMappings.filter(f => f.targetColumnType === 'OptionSet' || f.targetColumnType === 'MultiSelectOptionSet')
   const uniqueLookupCount = new Set(lookupMappings.map(f => f.lookupTable?.LookupTableUID).filter(Boolean)).size
@@ -194,12 +194,23 @@ export function Step3CreateColumns() {
       </div>
 
       {skip ? (
-        <MessageBar intent="success">
-          <MessageBarBody>
-            Column creation skipped — using {activeMappings.length} existing column{activeMappings.length !== 1 ? 's' : ''} in Dataverse.
-            Field logical names from the mapping will be used directly during import.
-          </MessageBarBody>
-        </MessageBar>
+        <>
+          <MessageBar intent="success">
+            <MessageBarBody>
+              Schema validated — no columns or option sets need to be created.
+            </MessageBarBody>
+          </MessageBar>
+          <div className={styles.summary}>
+            <div className={styles.summaryCard}>
+              <div className={styles.summaryCount} style={{ color: '#107c10' }}>{activeMappings.length}</div>
+              <div className={styles.summaryLabel}>Columns reused from existing schema</div>
+            </div>
+            <div className={styles.summaryCard}>
+              <div className={styles.summaryCount} style={{ color: '#107c10' }}>0</div>
+              <div className={styles.summaryLabel}>Columns to create</div>
+            </div>
+          </div>
+        </>
       ) : (
         <>
           {/* Summary cards */}

@@ -1,4 +1,5 @@
 import type { PoCustomField, PoLookupTable } from './projectOnline.types'
+import type { MigrationMode } from './dataOnly.types'
 
 export interface OptionSetMapping {
   lookupTableUID: string
@@ -30,6 +31,7 @@ export interface FieldMapping {
   useExistingField: boolean   // map to existing DV field — skip column creation
   relatedEntity?: { logicalName: string; logicalCollectionName: string }  // required when targetColumnType === 'Lookup'
   manualDefault?: string      // LookupEntryUID for OptionSet; raw string for other types
+  matchSource?: 'auto' | 'manual'  // dataOnly mode: how targetLogicalName was set
 }
 
 export interface OwnerMapping {
@@ -45,6 +47,7 @@ export interface MappingConfiguration {
   siteUrl: string
   publisherPrefix: string
   skipColumnCreation: boolean
+  migrationMode?: MigrationMode
   fieldMappings: FieldMapping[]
   ownerMappings: OwnerMapping[]
   savedAt: string

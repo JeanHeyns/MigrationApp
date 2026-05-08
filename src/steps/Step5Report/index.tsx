@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import {
   Button,
   MessageBar,
@@ -7,6 +8,7 @@ import {
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
 import type { ImportError } from '../../models/plannerPremium.types'
+import type { SkippedFieldInstance } from '../../models/dataOnly.types'
 
 const useStyles = makeStyles({
   root: {
@@ -49,7 +51,10 @@ const useStyles = makeStyles({
   errorMessage: { maxWidth: '620px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
   toolbar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
   footer: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' },
+  muted: { color: tokens.colorNeutralForeground3, fontSize: '12px' },
 })
+
+// ─── CSV helpers (shared) ─────────────────────────────────────────────────────
 
 function csvEscape(value: unknown): string {
   const text = String(value ?? '')
@@ -74,15 +79,67 @@ function flattenErrors(errors: ImportError[]): string[][] {
   ]
 }
 
+// ─── Skipped fields grouping ──────────────────────────────────────────────────
+
+interface SkippedGroup {
+  poField: string
+  dvField: string
+  reason: string
+  count: number
+  exampleValues: string[]
+  extraCount: number
+}
+
+function buildSkippedGroups(instances: SkippedFieldInstance[]): SkippedGroup[] {
+  const map = new Map<string, { poField: string; dvField: string; reason: string; count: number; uniqueValues: Set<string> }>()
+
+  for (const inst of instances) {
+    const key = `${inst.poField}||${inst.reason}`
+    const valStr = String(inst.originalValue ?? '')
+    const existing = map.get(key)
+    if (existing) {
+      existing.count++
+      if (valStr) existing.uniqueValues.add(valStr)
+    } else {
+      map.set(key, {
+        poField: inst.poField,
+        dvField: inst.dvField,
+        reason: inst.reason,
+        count: 1,
+        uniqueValues: valStr ? new Set([valStr]) : new Set(),
+      })
+    }
+  }
+
+  return [...map.values()]
+    .sort((a, b) => b.count - a.count)
+    .map(g => ({
+      poField: g.poField,
+      dvField: g.dvField,
+      reason: g.reason,
+      count: g.count,
+      exampleValues: [...g.uniqueValues].slice(0, 5),
+      extraCount: Math.max(0, g.uniqueValues.size - 5),
+    }))
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export function Step5Report() {
   const styles = useStyles()
-  const { importResults, prevStep, setCurrentStep, clearImportResults, clearLogs } = useMigration()
+  const {
+    importResults, prevStep, setCurrentStep, clearImportResults, clearLogs,
+    migrationMode, skippedFieldInstances, selectedSolution,
+    clearSkippedFieldInstances,
+  } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
   const totalSucceeded = importResults.reduce((s, r) => s + r.succeeded, 0)
   const totalFailed = importResults.reduce((s, r) => s + r.failed, 0)
   const allErrors = importResults.flatMap(r => r.errors)
   const successRate = totalRecords > 0 ? Math.round((totalSucceeded / totalRecords) * 100) : 0
+
+  const skippedGroups = useMemo(() => buildSkippedGroups(skippedFieldInstances), [skippedFieldInstances])
 
   function exportSummary() {
     downloadCsv('migration-summary.csv', [
@@ -99,6 +156,28 @@ export function Step5Report() {
 
   function exportErrors() {
     downloadCsv('migration-errors.csv', flattenErrors(allErrors))
+  }
+
+  function exportSkippedFields() {
+    const solutionName = selectedSolution?.uniquename ?? 'unknown'
+    const date = new Date().toISOString().slice(0, 10)
+    downloadCsv(`skipped-fields-${solutionName}-${date}.csv`, [
+      ['PO Field', 'Dataverse Field', 'Reason', 'Original Value', 'Source ID'],
+      ...skippedFieldInstances.map(inst => [
+        inst.poField,
+        inst.dvField,
+        inst.reason,
+        String(inst.originalValue ?? ''),
+        inst.sourceId,
+      ]),
+    ])
+  }
+
+  function handleStartNew() {
+    clearImportResults()
+    clearLogs()
+    clearSkippedFieldInstances()
+    setCurrentStep(1)
   }
 
   return (
@@ -135,6 +214,7 @@ export function Step5Report() {
         </div>
       </div>
 
+      {/* Entity Results */}
       <div className={styles.panel}>
         <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
           <div className={styles.sectionTitle}>Entity Results</div>
@@ -163,14 +243,13 @@ export function Step5Report() {
               </tr>
             ))}
             {importResults.length === 0 && (
-              <tr>
-                <td className={styles.td} colSpan={5}>No results.</td>
-              </tr>
+              <tr><td className={styles.td} colSpan={5}>No results.</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
+      {/* Failures And Skips */}
       <div className={styles.panel}>
         <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
           <div className={styles.sectionTitle}>Failures And Skips</div>
@@ -195,17 +274,68 @@ export function Step5Report() {
               </tr>
             ))}
             {allErrors.length === 0 && (
-              <tr>
-                <td className={styles.td} colSpan={4}>No failures or skipped records.</td>
-              </tr>
+              <tr><td className={styles.td} colSpan={4}>No failures or skipped records.</td></tr>
             )}
           </tbody>
         </table>
       </div>
 
+      {/* Skipped Fields — dataOnly mode only */}
+      {migrationMode === 'dataOnly' && (
+        <div className={styles.panel}>
+          <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
+            <div className={styles.sectionTitle}>Skipped Fields</div>
+            <Button size="small" onClick={exportSkippedFields} disabled={skippedFieldInstances.length === 0}>
+              Export CSV ({skippedFieldInstances.length})
+            </Button>
+          </div>
+
+          {skippedGroups.length === 0 ? (
+            <MessageBar intent="success">
+              <MessageBarBody>All fields migrated successfully — no unresolved choice or lookup values.</MessageBarBody>
+            </MessageBar>
+          ) : (
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th className={styles.th}>PO Field</th>
+                  <th className={styles.th}>Dataverse Field</th>
+                  <th className={styles.th}>Reason</th>
+                  <th className={styles.th} style={{ width: '72px', textAlign: 'right' }}>Records</th>
+                  <th className={styles.th}>Example values</th>
+                </tr>
+              </thead>
+              <tbody>
+                {skippedGroups.map((group, idx) => (
+                  <tr key={idx}>
+                    <td className={`${styles.td} ${styles.code}`}>{group.poField}</td>
+                    <td className={`${styles.td} ${styles.code}`}>{group.dvField}</td>
+                    <td className={styles.td} style={{ maxWidth: '340px', wordBreak: 'break-word' }}>{group.reason}</td>
+                    <td className={styles.td} style={{ textAlign: 'right', fontWeight: '600' }}>{group.count}</td>
+                    <td className={styles.td}>
+                      <span className={styles.code}>
+                        {group.exampleValues.map((v, i) => (
+                          <span key={i}>
+                            {i > 0 && <span className={styles.muted}>, </span>}
+                            &ldquo;{v}&rdquo;
+                          </span>
+                        ))}
+                      </span>
+                      {group.extraCount > 0 && (
+                        <span className={styles.muted}> +{group.extraCount} more</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
       <div className={styles.footer}>
         <Button onClick={prevStep}>Back to Import</Button>
-        <Button onClick={() => { clearImportResults(); clearLogs(); setCurrentStep(1) }}>Start New Migration</Button>
+        <Button onClick={handleStartNew}>Start New Migration</Button>
       </div>
     </div>
   )
