@@ -3,6 +3,7 @@ import { Button, MessageBar, MessageBarBody, Spinner, makeStyles, tokens } from 
 import { useMigration } from '../../app/MigrationContext'
 import { createOptionSets } from '../../services/plannerPremium/choiceSetManager'
 import { createColumns, createMigrationColumns } from '../../services/plannerPremium/columnManager'
+import { orchestrateSchemaCreation } from '../../services/plannerPremium/schemaOrchestrator'
 import type { OptionSetMapping } from '../../models/mapping.types'
 import type { ColumnCreateResult } from '../../services/plannerPremium/columnManager'
 
@@ -70,7 +71,10 @@ const LEVEL_PREFIX: Record<LogLine['level'], string> = {
 
 export function Step3CreateColumns() {
   const styles = useStyles()
-  const { mappingConfig, selectedSolution, setOptionSetMappings, nextStep, prevStep, migrationMode } = useMigration()
+  const {
+    fetchedData, mappingConfig, selectedSolution, setOptionSetMappings,
+    nextStep, prevStep, migrationMode, setSchemaCreationResults,
+  } = useMigration()
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [logLines, setLogLines] = useState<LogLine[]>([])
@@ -83,6 +87,11 @@ export function Step3CreateColumns() {
   const activeMappings = mappingConfig?.fieldMappings.filter(f => !f.skip) ?? []
   const lookupMappings = activeMappings.filter(f => f.targetColumnType === 'OptionSet' || f.targetColumnType === 'MultiSelectOptionSet')
   const uniqueLookupCount = new Set(lookupMappings.map(f => f.lookupTable?.LookupTableUID).filter(Boolean)).size
+  const lookupEntityCount = new Set(activeMappings
+    .filter(f => f.targetColumnType === 'Lookup')
+    .map(f => f.lookupTable?.LookupTableUID)
+    .filter(Boolean)
+  ).size
 
   function appendLog(level: LogLine['level'], message: string) {
     const time = new Date().toLocaleTimeString('en', { hour12: false })
@@ -103,6 +112,40 @@ export function Step3CreateColumns() {
     setErrorCount(0)
 
     appendLog('info', `Starting column setup for solution "${selectedSolution.uniquename}"…`)
+
+    if (migrationMode === 'schemaOnly') {
+      if (!fetchedData) return
+      const orchestration = await orchestrateSchemaCreation({
+        mappingConfig,
+        poLookupTables: fetchedData.lookupTables,
+        selectedSolution,
+        publisherPrefix: mappingConfig.publisherPrefix,
+        onProgress: (msg, level = 'info') => appendLog(level, msg),
+      })
+      setOptionSetMappings(orchestration.optionSetMappings)
+      setSchemaCreationResults(orchestration)
+      const ok =
+        orchestration.columns.created.length +
+        orchestration.optionSets.created.length +
+        orchestration.lookupEntities.created.length +
+        orchestration.lookupEntries.inserted.length
+      const skipped =
+        orchestration.columns.skipped.length +
+        orchestration.optionSets.skipped.length +
+        orchestration.lookupEntities.skipped.length +
+        orchestration.lookupEntries.skipped.length
+      const err =
+        orchestration.columns.failed.length +
+        orchestration.optionSets.failed.length +
+        orchestration.lookupEntities.failed.length +
+        orchestration.lookupEntries.failed.length
+      setSuccessCount(ok)
+      setSkipCount(skipped)
+      setErrorCount(err)
+      appendLog(err > 0 ? 'error' : 'success', `Schema setup complete - ${ok} created, ${skipped} skipped, ${err} error(s).`)
+      setPhase(err > 0 ? 'error' : 'done')
+      return
+    }
 
     let osMappings: OptionSetMapping[] = []
 
@@ -220,6 +263,12 @@ export function Step3CreateColumns() {
                 <div className={styles.summaryCount}>{uniqueLookupCount}</div>
                 <div className={styles.summaryLabel}>OptionSets to create</div>
               </div>
+              {migrationMode === 'schemaOnly' && (
+                <div className={styles.summaryCard}>
+                  <div className={styles.summaryCount}>{lookupEntityCount}</div>
+                  <div className={styles.summaryLabel}>Lookup entities to ensure</div>
+                </div>
+              )}
               <div className={styles.summaryCard}>
                 <div className={styles.summaryCount}>{activeMappings.length}</div>
                 <div className={styles.summaryLabel}>Columns to create</div>
@@ -244,7 +293,7 @@ export function Step3CreateColumns() {
               onClick={handleStart}
               disabled={!selectedSolution}
             >
-              Create OptionSets &amp; Columns
+              {migrationMode === 'schemaOnly' ? 'Create Schema' : 'Create OptionSets & Columns'}
             </Button>
           )}
 
@@ -298,7 +347,7 @@ export function Step3CreateColumns() {
           onClick={nextStep}
           disabled={phase === 'running' || (!skip && !isDone)}
         >
-          Next: Import Data →
+          {migrationMode === 'schemaOnly' ? 'Next: View Report →' : 'Next: Import Data →'}
         </Button>
       </div>
     </div>

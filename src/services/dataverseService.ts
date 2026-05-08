@@ -253,6 +253,68 @@ export async function createEntityAttribute(
   return (res.data ?? {}) as Record<string, unknown>
 }
 
+export async function createEntityDefinition(
+  item: Record<string, unknown>,
+  solutionUniqueName?: string,
+): Promise<Record<string, unknown>> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: ORG_URL,
+    prefer: 'return=representation',
+    accept: 'application/json',
+    item,
+  }
+  if (solutionUniqueName) params['MSCRM.SolutionUniqueName'] = solutionUniqueName
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'CreateEntityDefinition',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  return (res.data ?? {}) as Record<string, unknown>
+}
+
+export async function fetchEntityDefinition(entityLogicalName: string): Promise<{
+  logicalName: string
+  entitySetName: string
+  primaryNameField: string
+  metadataId?: string
+} | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const params: Record<string, any> = {
+      organization: ORG_URL,
+      accept: 'application/json',
+      entityLogicalName,
+      '$select': 'LogicalName,EntitySetName,PrimaryNameAttribute,MetadataId',
+    }
+
+    const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+      connectorOperation: {
+        tableName: 'commondataserviceforapps',
+        operationName: 'GetEntityDefinition',
+        parameters: params,
+      },
+    })
+
+    if (!res.success) throw new Error(extractDvError(res))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = res.data as any
+    return {
+      logicalName: raw?.LogicalName ?? entityLogicalName,
+      entitySetName: raw?.EntitySetName ?? `${entityLogicalName}s`,
+      primaryNameField: raw?.PrimaryNameAttribute ?? 'name',
+      metadataId: raw?.MetadataId,
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function getGlobalOptionSetMetadataId(name: string): Promise<string | null> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

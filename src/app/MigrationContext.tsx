@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState } from 'react'
 import type { PoFetchedData } from '../models/projectOnline.types'
 import type { MappingConfiguration, OptionSetMapping } from '../models/mapping.types'
 import type { DvSolution, ImportResult, LogEntry } from '../models/plannerPremium.types'
-import type { MigrationMode, SchemaSnapshot, ResolverPlan, SkippedFieldInstance } from '../models/dataOnly.types'
+import type { MigrationMode, SchemaCreationResults, SchemaSnapshot, ResolverPlan, SkippedFieldInstance } from '../models/dataOnly.types'
 
 export type DataSource = 'ProjectOnline' | 'FileUpload'
 
@@ -21,6 +21,7 @@ interface MigrationState {
   schemaSnapshot: SchemaSnapshot | null
   resolverPlan: ResolverPlan | null
   skippedFieldInstances: SkippedFieldInstance[]
+  schemaCreationResults: SchemaCreationResults | null
 }
 
 interface MigrationActions {
@@ -43,6 +44,7 @@ interface MigrationActions {
   setResolverPlan: (plan: ResolverPlan | null) => void
   addSkippedFieldInstances: (instances: SkippedFieldInstance[]) => void
   clearSkippedFieldInstances: () => void
+  setSchemaCreationResults: (results: SchemaCreationResults | null) => void
 }
 
 type MigrationContextType = MigrationState & MigrationActions
@@ -64,6 +66,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [schemaSnapshot, setSchemaSnapshot] = useState<SchemaSnapshot | null>(null)
   const [resolverPlan, setResolverPlan] = useState<ResolverPlan | null>(null)
   const [skippedFieldInstances, setSkippedFieldInstances] = useState<SkippedFieldInstance[]>([])
+  const [schemaCreationResults, setSchemaCreationResults] = useState<SchemaCreationResults | null>(null)
 
   function setMigrationMode(mode: MigrationMode) {
     setMigrationModeState(mode)
@@ -72,10 +75,13 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       setSchemaSnapshot(null)
       setResolverPlan(null)
     }
+    if (mode === 'dataOnly') {
+      setSchemaCreationResults(null)
+    }
   }
 
-  const nextStep = () => setCurrentStep(s => Math.min(s + 1, 5))
-  const prevStep = () => setCurrentStep(s => Math.max(s - 1, 1))
+  const nextStep = () => setCurrentStep(s => migrationMode === 'schemaOnly' && s === 3 ? 5 : Math.min(s + 1, 5))
+  const prevStep = () => setCurrentStep(s => migrationMode === 'schemaOnly' && s === 5 ? 3 : Math.max(s - 1, 1))
 
   const addImportResult = (result: ImportResult) =>
     setImportResults(prev => [...prev, result])
@@ -95,13 +101,14 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     <MigrationContext.Provider value={{
       currentStep, pwaUrl, dataSource, selectedSolution, skipColumnCreation,
       fetchedData, mappingConfig, optionSetMappings, importResults, logs,
-      migrationMode, schemaSnapshot, resolverPlan,
+      migrationMode, schemaSnapshot, resolverPlan, schemaCreationResults,
       setCurrentStep, nextStep, prevStep, setPwaUrl, setDataSource,
       setSelectedSolution, setSkipColumnCreation,
       setFetchedData, setMappingConfig, setOptionSetMappings,
       addImportResult, clearImportResults, addLog, clearLogs,
       setMigrationMode, setSchemaSnapshot, setResolverPlan,
       skippedFieldInstances, addSkippedFieldInstances, clearSkippedFieldInstances,
+      setSchemaCreationResults,
     }}>
       {children}
     </MigrationContext.Provider>

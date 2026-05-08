@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   Checkbox,
@@ -64,7 +64,7 @@ export function Step4Import() {
     addImportResult, clearImportResults,
     migrationMode, resolverPlan,
     addSkippedFieldInstances, clearSkippedFieldInstances,
-    addLog,
+    addLog, setCurrentStep,
   } = useMigration()
   const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(
     () => new Set(fetchedData?.projects.map(p => p.ProjectId) ?? []),
@@ -77,6 +77,10 @@ export function Step4Import() {
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (migrationMode === 'schemaOnly') setCurrentStep(5)
+  }, [migrationMode, setCurrentStep])
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],

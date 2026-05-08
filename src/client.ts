@@ -72,6 +72,19 @@ export const client = getClient({
         ],
         responseInfo: { default: { type: 'object' } },
       },
+      CreateEntityDefinition: {
+        path: '/{connectionId}/api/data/v9.1.0/EntityDefinitions',
+        method: 'POST',
+        parameters: [
+          { name: 'connectionId',              in: 'path',   required: true,  type: 'string' },
+          { name: 'organization',              in: 'header', required: true,  type: 'string' },
+          { name: 'prefer',                    in: 'header', required: false, type: 'string' },
+          { name: 'accept',                    in: 'header', required: true,  type: 'string' },
+          { name: 'MSCRM.SolutionUniqueName',  in: 'header', required: false, type: 'string' },
+          { name: 'item',                      in: 'body',   required: true,  type: 'object' },
+        ],
+        responseInfo: { default: { type: 'object' } },
+      },
       CreateEntityAttribute: {
         path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/Attributes",
         method: 'POST',

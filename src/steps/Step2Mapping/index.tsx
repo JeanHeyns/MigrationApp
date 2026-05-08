@@ -15,6 +15,7 @@ import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import { fetchEntityAttributes, fetchEntityDefinitions, fetchSolutionEntityIds, type DvEntityAttribute, type DvEntityDefinition } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
+import { lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
 import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
 import type { DataverseColumnType, FieldMapping, MappingConfiguration, OwnerMapping } from '../../models/mapping.types'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
@@ -221,6 +222,31 @@ function buildInitialMappings(data: PoFetchedData, prefix: string): FieldMapping
   }))
 }
 
+function buildSchemaOnlyMappings(data: PoFetchedData, prefix: string): FieldMapping[] {
+  const lookupMap = new Map(data.lookupTables.map(lt => [lt.LookupTableUID, lt]))
+  return data.customFields.map(cf => {
+    const lookupTable = cf.CustomFieldLookupTableUID
+      ? lookupMap.get(cf.CustomFieldLookupTableUID)
+      : undefined
+    const targetColumnType =
+      cf.CustomFieldType === 'Lookup' && lookupTable
+        ? 'Lookup'
+        : SUGGESTED_DV_TYPE[cf.CustomFieldType]
+    return {
+      customField: cf,
+      targetColumnType,
+      targetLogicalName: toLogicalName(cf.CustomFieldName, prefix),
+      lookupTable,
+      skip: cf.CustomFieldEntityType === 'Resource',
+      migrateValue: false,
+      useExistingField: false,
+      relatedEntity: targetColumnType === 'Lookup' && lookupTable
+        ? { logicalName: lookupEntityLogicalName(lookupTable, prefix), logicalCollectionName: '' }
+        : undefined,
+    }
+  })
+}
+
 function ownerResourceId(p: { ProjectOwnerResourceId?: string; ProjectOwnerResourceUid?: string }): string | undefined {
   return p.ProjectOwnerResourceId ?? p.ProjectOwnerResourceUid
 }
@@ -367,6 +393,8 @@ export function Step2Mapping() {
     }
     if (migrationMode === 'dataOnly' && schemaSnapshot) {
       setFieldMappings(buildDataOnlyMappings(fetchedData, schemaSnapshot, prefix))
+    } else if (migrationMode === 'schemaOnly') {
+      setFieldMappings(buildSchemaOnlyMappings(fetchedData, prefix))
     } else if (migrationMode === 'full') {
       setFieldMappings(buildInitialMappings(fetchedData, prefix))
     }
@@ -397,7 +425,7 @@ export function Step2Mapping() {
 
   // Load Dataverse system users and owner resources for owner matching
   useEffect(() => {
-    if (!fetchedData) return
+    if (!fetchedData || migrationMode === 'schemaOnly') return
     setLoadingUsers(true)
     const ownerIds = [...new Set(
       fetchedData.projects.map(ownerResourceId).filter(Boolean) as string[]
@@ -565,6 +593,8 @@ export function Step2Mapping() {
     if (!fetchedData) return
     if (migrationMode === 'dataOnly' && schemaSnapshot) {
       setFieldMappings(buildDataOnlyMappings(fetchedData, schemaSnapshot, prefix))
+    } else if (migrationMode === 'schemaOnly') {
+      setFieldMappings(buildSchemaOnlyMappings(fetchedData, prefix))
     } else {
       setFieldMappings(buildInitialMappings(fetchedData, prefix))
     }
@@ -585,6 +615,7 @@ export function Step2Mapping() {
       siteUrl: fetchedData?.pwaUrl ?? '',
       publisherPrefix: prefix,
       skipColumnCreation,
+      migrationMode,
       fieldMappings,
       ownerMappings,
       savedAt: new Date().toISOString(),
@@ -645,6 +676,11 @@ export function Step2Mapping() {
             Data only — mapping to existing schema
           </span>
         )}
+        {migrationMode === 'schemaOnly' && (
+          <span style={{ fontSize: '12px', color: '#107c10', fontWeight: '600' }}>
+            Schema only - create new schema, skip data import
+          </span>
+        )}
       </div>
 
       {/* ── Toolbar ── */}
@@ -655,6 +691,11 @@ export function Step2Mapping() {
         <Button size="small" onClick={handleSaveJson}>Save mapping as JSON</Button>
         <Button size="small" onClick={() => fileInputRef.current?.click()}>Load mapping from JSON</Button>
         <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleLoadJson} />
+        {migrationMode === 'schemaOnly' ? (
+          <span className={styles.summary}>
+            {activeFields.length} field{activeFields.length !== 1 ? 's' : ''} will be created, {fieldMappings.length - activeFields.length} skipped
+          </span>
+        ) : (
         <span className={styles.summary}>
           {activeFields.length} of {fieldMappings.length} fields active · {migratingFields.length} value(s) will migrate ·{' '}
           {unmatchedOwners.length > 0
@@ -662,12 +703,13 @@ export function Step2Mapping() {
             : <span style={{ color: '#107c10' }}>all owners matched</span>
           }
         </span>
+        )}
       </div>
 
       {/* ── Field mapping table ── */}
       <div>
         <div className={styles.sectionTitle}>Custom Field Mapping ({fieldMappings.length} fields)</div>
-        {dvAttrError && (
+        {migrationMode !== 'schemaOnly' && dvAttrError && (
           <MessageBar intent="warning" style={{ marginBottom: '8px' }}>
             <MessageBarBody>Could not load existing Dataverse fields: {dvAttrError}</MessageBarBody>
           </MessageBar>
@@ -679,7 +721,7 @@ export function Step2Mapping() {
               <th className={styles.th}>Field Name</th>
               <th className={styles.th} style={{ whiteSpace: 'nowrap' }}>PO Type</th>
               <th className={styles.th}>Dataverse Target</th>
-              {migrationMode !== 'dataOnly' && (
+              {migrationMode === 'full' && (
                 <th className={styles.th} style={{ width: '88px', textAlign: 'center' }}>Migrate value</th>
               )}
             </tr>
@@ -737,6 +779,30 @@ export function Step2Mapping() {
                 <td className={styles.td}>
                   {m.skip
                     ? <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                    : migrationMode === 'schemaOnly'
+                      ? <>
+                          <Select
+                            size="small"
+                            className={styles.selectFixed}
+                            value={m.targetColumnType}
+                            title={DV_TYPE_LABELS[m.targetColumnType]}
+                            onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
+                          >
+                            {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
+                              <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
+                            ))}
+                          </Select>
+                          {m.targetColumnType === 'Lookup' && m.lookupTable && (
+                            <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                              Will create lookup entity {lookupEntityLogicalName(m.lookupTable, prefix)} with {m.lookupTable.entries.length} entries
+                            </div>
+                          )}
+                          {m.targetColumnType !== 'Lookup' && m.lookupTable && (
+                            <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                              {m.lookupTable.LookupTableName} Â· {m.lookupTable.entries.length} entries
+                            </div>
+                          )}
+                        </>
                     : migrationMode === 'dataOnly'
                       ? (() => {
                           const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
@@ -858,7 +924,7 @@ export function Step2Mapping() {
                 </td>
 
                 {/* Col 5: Migrate value */}
-                {migrationMode !== 'dataOnly' && (
+                {migrationMode === 'full' && (
                   <td className={styles.td} style={{ textAlign: 'center' }}>
                     <Checkbox
                       checked={m.migrateValue}
@@ -874,10 +940,10 @@ export function Step2Mapping() {
         </table>
       </div>
 
-      <Divider />
+      {migrationMode !== 'schemaOnly' && <Divider />}
 
       {/* ── Owner mapping ── */}
-      <div>
+      <div style={{ display: migrationMode === 'schemaOnly' ? 'none' : undefined }}>
         <div className={styles.sectionTitle}>
           Project Owner Mapping
           {loadingUsers && <Spinner size="tiny" style={{ marginLeft: '8px' }} />}
@@ -979,7 +1045,11 @@ export function Step2Mapping() {
       <div className={styles.footer}>
         <Button onClick={prevStep}>← Back</Button>
         <Button appearance="primary" onClick={handleNext} disabled={activeFields.length === 0}>
-          {migrationMode === 'dataOnly' ? 'Next: Validate Schema →' : 'Next: Create Columns →'}
+          {migrationMode === 'dataOnly'
+            ? 'Next: Validate Schema →'
+            : migrationMode === 'schemaOnly'
+              ? 'Next: Create Schema →'
+              : 'Next: Create Columns →'}
         </Button>
       </div>
     </div>

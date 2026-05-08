@@ -8,7 +8,7 @@ import {
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
 import type { ImportError } from '../../models/plannerPremium.types'
-import type { SkippedFieldInstance } from '../../models/dataOnly.types'
+import type { SchemaCreationResults, SkippedFieldInstance } from '../../models/dataOnly.types'
 
 const useStyles = makeStyles({
   root: {
@@ -79,6 +79,28 @@ function flattenErrors(errors: ImportError[]): string[][] {
   ]
 }
 
+function schemaRows(results: SchemaCreationResults): string[][] {
+  return [
+    ['Category', 'Status', 'Entity/Name', 'Detail'],
+    ...results.columns.created.map(r => ['Columns', 'created', `${r.entity}.${r.logicalName}`, r.type]),
+    ...results.columns.skipped.map(r => ['Columns', 'skipped', `${r.entity}.${r.logicalName}`, r.reason]),
+    ...results.columns.failed.map(r => ['Columns', 'failed', `${r.entity}.${r.logicalName}`, r.error]),
+    ...results.optionSets.created.map(r => ['Option Sets', 'created', r.name, `${r.optionCount} options`]),
+    ...results.optionSets.skipped.map(r => ['Option Sets', 'skipped', r.name, r.reason]),
+    ...results.optionSets.failed.map(r => ['Option Sets', 'failed', r.name, r.error]),
+    ...results.lookupEntities.created.map(r => ['Lookup Entities', 'created', r.logicalName, r.displayName]),
+    ...results.lookupEntities.skipped.map(r => ['Lookup Entities', 'skipped', r.logicalName, r.reason]),
+    ...results.lookupEntities.failed.map(r => ['Lookup Entities', 'failed', r.logicalName, r.error]),
+    ...results.lookupEntries.inserted.map(r => ['Lookup Entries', 'inserted', `${r.entity}.${r.name}`, '']),
+    ...results.lookupEntries.skipped.map(r => ['Lookup Entries', 'skipped', `${r.entity}.${r.name}`, r.reason]),
+    ...results.lookupEntries.failed.map(r => ['Lookup Entries', 'failed', `${r.entity}.${r.name}`, r.error]),
+  ]
+}
+
+function categoryTotal<T extends Record<string, unknown[]>>(category: T): number {
+  return Object.values(category).reduce((sum, rows) => sum + rows.length, 0)
+}
+
 // ─── Skipped fields grouping ──────────────────────────────────────────────────
 
 interface SkippedGroup {
@@ -130,7 +152,7 @@ export function Step5Report() {
   const {
     importResults, prevStep, setCurrentStep, clearImportResults, clearLogs,
     migrationMode, skippedFieldInstances, selectedSolution,
-    clearSkippedFieldInstances,
+    clearSkippedFieldInstances, schemaCreationResults, setSchemaCreationResults,
   } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
@@ -173,12 +195,22 @@ export function Step5Report() {
     ])
   }
 
+  function exportSchemaResults() {
+    if (!schemaCreationResults) return
+    const solutionName = selectedSolution?.uniquename ?? 'unknown'
+    const date = new Date().toISOString().slice(0, 10)
+    downloadCsv(`schema-creation-${solutionName}-${date}.csv`, schemaRows(schemaCreationResults))
+  }
+
   function handleStartNew() {
     clearImportResults()
     clearLogs()
     clearSkippedFieldInstances()
+    setSchemaCreationResults(null)
     setCurrentStep(1)
   }
+
+  const showImportReport = migrationMode !== 'schemaOnly'
 
   return (
     <div className={styles.root}>
@@ -189,12 +221,68 @@ export function Step5Report() {
         </div>
       </div>
 
-      {importResults.length === 0 && (
+      {showImportReport && importResults.length === 0 && (
         <MessageBar intent="warning">
           <MessageBarBody>No import results are available yet. Run Step 4 first.</MessageBarBody>
         </MessageBar>
       )}
 
+      {schemaCreationResults && (
+        <div className={styles.panel}>
+          <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
+            <div className={styles.sectionTitle}>Schema Creation Summary</div>
+            <Button size="small" onClick={exportSchemaResults}>Export schema CSV</Button>
+          </div>
+          {categoryTotal(schemaCreationResults.columns) +
+            categoryTotal(schemaCreationResults.optionSets) +
+            categoryTotal(schemaCreationResults.lookupEntities) +
+            categoryTotal(schemaCreationResults.lookupEntries) === 0 ? (
+              <MessageBar intent="success">
+                <MessageBarBody>No schema changes needed.</MessageBarBody>
+              </MessageBar>
+            ) : (
+              <table className={styles.table}>
+                <thead>
+                  <tr>
+                    <th className={styles.th}>Category</th>
+                    <th className={styles.th}>Created / inserted</th>
+                    <th className={styles.th}>Skipped</th>
+                    <th className={styles.th}>Failed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td className={styles.td}>Columns</td>
+                    <td className={styles.td}>{schemaCreationResults.columns.created.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.columns.skipped.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.columns.failed.length}</td>
+                  </tr>
+                  <tr>
+                    <td className={styles.td}>Option Sets</td>
+                    <td className={styles.td}>{schemaCreationResults.optionSets.created.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.optionSets.skipped.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.optionSets.failed.length}</td>
+                  </tr>
+                  <tr>
+                    <td className={styles.td}>Lookup Entities</td>
+                    <td className={styles.td}>{schemaCreationResults.lookupEntities.created.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.lookupEntities.skipped.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.lookupEntities.failed.length}</td>
+                  </tr>
+                  <tr>
+                    <td className={styles.td}>Lookup Entries</td>
+                    <td className={styles.td}>{schemaCreationResults.lookupEntries.inserted.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.lookupEntries.skipped.length}</td>
+                    <td className={styles.td}>{schemaCreationResults.lookupEntries.failed.length}</td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+        </div>
+      )}
+
+      {showImportReport && (
+      <>
       <div className={styles.summaryGrid}>
         <div className={styles.metric}>
           <div className={styles.metricLabel}>Total processed</div>
@@ -279,6 +367,8 @@ export function Step5Report() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
 
       {/* Skipped Fields — dataOnly mode only */}
       {migrationMode === 'dataOnly' && (
@@ -334,7 +424,7 @@ export function Step5Report() {
       )}
 
       <div className={styles.footer}>
-        <Button onClick={prevStep}>Back to Import</Button>
+        <Button onClick={prevStep}>{migrationMode === 'schemaOnly' ? 'Back to Schema Creation' : 'Back to Import'}</Button>
         <Button onClick={handleStartNew}>Start New Migration</Button>
       </div>
     </div>

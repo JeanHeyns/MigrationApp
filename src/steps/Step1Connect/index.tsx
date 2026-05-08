@@ -27,6 +27,7 @@ import { inspectSolution } from '../../services/plannerPremium/schemaInspector'
 import { parseWorkbook, generateTemplate } from '../../services/fileImportService'
 import type { PoFetchedData } from '../../models/projectOnline.types'
 import type { DvSolution } from '../../models/plannerPremium.types'
+import type { MigrationMode } from '../../models/dataOnly.types'
 
 const useStyles = makeStyles({
   root: {
@@ -221,6 +222,12 @@ const INITIAL_ITEMS: FetchItem[] = [
   { key: 'lookupTables', label: 'Lookup Tables',  status: 'pending', count: 0 },
 ]
 
+const SCHEMA_ONLY_ITEMS: FetchItem[] = INITIAL_ITEMS.map(item =>
+  item.key === 'customFields' || item.key === 'lookupTables'
+    ? item
+    : { ...item, status: 'done', count: 0 }
+)
+
 const STATUS_ICON: Record<FetchItemStatus, string> = {
   pending:  '○',
   fetching: '⟳',
@@ -309,7 +316,7 @@ export function Step1Connect() {
     }
     setGlobalError(null)
     setPhase('fetching')
-    setItems(INITIAL_ITEMS)
+    setItems(migrationMode === 'schemaOnly' ? SCHEMA_ONLY_ITEMS : INITIAL_ITEMS)
     setPwaUrl(url)
 
     const data: PoFetchedData = {
@@ -319,7 +326,7 @@ export function Step1Connect() {
     }
 
     type FetchStep = { key: keyof PoFetchedData; fn: () => Promise<unknown[]> }
-    const steps: FetchStep[] = [
+    const fullSteps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
       { key: 'tasks',        fn: () => fetchTasks(url) },
       { key: 'resources',    fn: () => fetchResources(url) },
@@ -328,6 +335,11 @@ export function Step1Connect() {
       { key: 'customFields', fn: () => fetchCustomFields(url) },
       { key: 'lookupTables', fn: () => fetchLookupTables(url) },
     ]
+    const schemaOnlySteps: FetchStep[] = [
+      { key: 'customFields', fn: () => fetchCustomFields(url) },
+      { key: 'lookupTables', fn: () => fetchLookupTables(url) },
+    ]
+    const steps = migrationMode === 'schemaOnly' ? schemaOnlySteps : fullSteps
 
     let anyError = false
     for (const step of steps) {
@@ -395,9 +407,13 @@ export function Step1Connect() {
   }
 
   // ── canProceed logic ─────────────────────────────────────────────────────
-  const poReady     = dataSource === 'ProjectOnline' && (phase === 'done' || phase === 'error') && !!result && result.projects.length > 0
+  const poReady     = dataSource === 'ProjectOnline' && (phase === 'done' || phase === 'error') && !!result && (
+    migrationMode === 'schemaOnly'
+      ? result.customFields.length > 0 || result.lookupTables.length > 0
+      : result.projects.length > 0
+  )
   const fileReady   = dataSource === 'FileUpload' && !!uploadResult && uploadResult.projects.length > 0
-  const scanOk      = migrationMode === 'full' || (migrationMode === 'dataOnly' && scanPhase === 'done')
+  const scanOk      = migrationMode !== 'dataOnly' || scanPhase === 'done'
   const canProceed  = (poReady || fileReady) && !!selectedSolution && scanOk
 
   const isFetching  = phase === 'fetching'
@@ -586,8 +602,9 @@ export function Step1Connect() {
             <RadioGroup
               value={migrationMode}
               onChange={(_, d) => {
-                setMigrationMode(d.value as 'full' | 'dataOnly')
-                if (d.value === 'full') {
+                const mode = d.value as MigrationMode
+                setMigrationMode(mode)
+                if (mode !== 'dataOnly') {
                   setSchemaSnapshot(null)
                   setScanPhase('idle')
                   setScanError(null)
@@ -597,6 +614,7 @@ export function Step1Connect() {
             >
               <Radio value="full" label="Full migration — create columns + migrate data" />
               <Radio value="dataOnly" label="Data only — use existing schema, migrate data" />
+              <Radio value="schemaOnly" label="Schema only — create schema, skip data" />
             </RadioGroup>
           </div>
         )}

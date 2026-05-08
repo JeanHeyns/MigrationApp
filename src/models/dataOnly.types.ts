@@ -1,4 +1,4 @@
-export type MigrationMode = 'full' | 'dataOnly'
+export type MigrationMode = 'full' | 'dataOnly' | 'schemaOnly'
 
 export type ColumnMetaType =
   | 'String'
@@ -64,4 +64,29 @@ export interface SkippedFieldInstance {
   originalValue: unknown
   partialResolution?: { resolvedLabels: string[]; failedLabels: string[] }
   sourceId: string  // poProjectId (or future: taskId, resourceId)
+}
+
+export interface SchemaCreationResults {
+  startedAt: Date
+  completedAt: Date | null
+  columns: {
+    created: Array<{ entity: string; logicalName: string; type: string }>
+    skipped: Array<{ entity: string; logicalName: string; reason: string }>
+    failed: Array<{ entity: string; logicalName: string; error: string }>
+  }
+  optionSets: {
+    created: Array<{ name: string; optionCount: number }>
+    skipped: Array<{ name: string; reason: string }>
+    failed: Array<{ name: string; error: string }>
+  }
+  lookupEntities: {
+    created: Array<{ logicalName: string; displayName: string }>
+    skipped: Array<{ logicalName: string; reason: string }>
+    failed: Array<{ logicalName: string; error: string }>
+  }
+  lookupEntries: {
+    inserted: Array<{ entity: string; name: string }>
+    skipped: Array<{ entity: string; name: string; reason: string }>
+    failed: Array<{ entity: string; name: string; error: string }>
+  }
 }

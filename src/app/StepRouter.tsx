@@ -6,13 +6,13 @@ import { Step4Import } from '../steps/Step4Import'
 import { Step5Report } from '../steps/Step5Report'
 
 export function StepRouter() {
-  const { currentStep } = useMigration()
+  const { currentStep, migrationMode } = useMigration()
 
   switch (currentStep) {
     case 1: return <Step1Connect />
     case 2: return <Step2Mapping />
     case 3: return <Step3CreateColumns />
-    case 4: return <Step4Import />
+    case 4: return migrationMode === 'schemaOnly' ? <Step5Report /> : <Step4Import />
     case 5: return <Step5Report />
     default: return <Step1Connect />
   }
