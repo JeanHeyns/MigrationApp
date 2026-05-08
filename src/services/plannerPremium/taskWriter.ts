@@ -300,7 +300,6 @@ function buildTaskEntity(
     msdyn_start: task.TaskStartDate,
     msdyn_duration: task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes,
     ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {}),
-    ...(task.TaskOutlineNumber ? { msdyn_outlinenumber: task.TaskOutlineNumber } : {}),
     ...(parentId ? { 'msdyn_parenttask@odata.bind': `/msdyn_projecttasks(${parentId})` } : {}),
   }
 }

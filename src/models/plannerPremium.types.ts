@@ -15,7 +15,6 @@ export interface DvTask {
   msdyn_duration?: number
   msdyn_percentcomplete?: number
   msdyn_outlinelevel?: number
-  msdyn_outlinenumber?: string
   msdyn_ismilestone?: boolean
   [key: string]: unknown
 }
