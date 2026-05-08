@@ -480,6 +480,7 @@ export interface EntityWithCustomAttributes {
   primaryNameField: string
   rawAttrs: Array<{
     LogicalName: string
+    MetadataId?: string
     DisplayName?: { UserLocalizedLabel?: { Label?: string } }
     AttributeType: string
     AttributeTypeName?: { Value?: string }
@@ -493,7 +494,7 @@ export async function fetchEntityWithCustomAttributes(entityLogicalName: string)
     accept: 'application/json',
     entityLogicalName,
     '$select': 'LogicalName,EntitySetName,PrimaryNameAttribute',
-    '$expand': 'Attributes($filter=IsCustomAttribute eq true;$select=LogicalName,DisplayName,AttributeType,AttributeTypeName)',
+    '$expand': 'Attributes($filter=IsCustomAttribute eq true;$select=LogicalName,MetadataId,DisplayName,AttributeType,AttributeTypeName)',
   }
 
   const res = await client.executeAsync<typeof params, Record<string, unknown>>({
@@ -547,8 +548,45 @@ export async function fetchCustomEntityAttributes(entityLogicalName: string): Pr
 
 export interface RawPicklistAttributeMeta {
   LogicalName: string
-  OptionSet?: { Name?: string; IsGlobal?: boolean }
-  GlobalOptionSet?: { Name?: string; IsGlobal?: boolean }
+  OptionSet?: { Name?: string; IsGlobal?: boolean; MetadataId?: string; Options?: RawOptionMetadata[] }
+  GlobalOptionSet?: { Name?: string; IsGlobal?: boolean; MetadataId?: string; Options?: RawOptionMetadata[] }
+}
+
+export type RawLocalizedLabel = { Label?: unknown }
+export type RawOptionMetadata = {
+  Value?: unknown
+  value?: unknown
+  Label?: {
+    UserLocalizedLabel?: { Label?: unknown }
+    LocalizedLabels?: RawLocalizedLabel[]
+  }
+  label?: {
+    userLocalizedLabel?: { label?: unknown }
+    localizedLabels?: Array<{ label?: unknown }>
+  }
+}
+
+export function parseOptionSetOptions(rawOptions: RawOptionMetadata[] = []): GlobalOptionSetMeta['options'] {
+  return rawOptions.map(o => {
+    const userLabel = typeof o.Label?.UserLocalizedLabel?.Label === 'string'
+      ? o.Label.UserLocalizedLabel.Label
+      : typeof o.label?.userLocalizedLabel?.label === 'string'
+        ? o.label.userLocalizedLabel.label
+      : undefined
+    const localizedLabels = [
+      ...(o.Label?.LocalizedLabels ?? []).map(l => l.Label),
+      ...(o.label?.localizedLabels ?? []).map(l => l.label),
+    ]
+      .filter((label): label is string => typeof label === 'string' && label.length > 0)
+    const labels = Array.from(new Set([userLabel, ...localizedLabels].filter((label): label is string => !!label)))
+    const rawValue = o.Value ?? o.value
+    const value = typeof rawValue === 'number' ? rawValue : Number(rawValue)
+    return {
+      value,
+      label: labels[0] ?? String(value),
+      labels,
+    }
+  })
 }
 
 async function fetchAttributesByCast(
@@ -556,23 +594,30 @@ async function fetchAttributesByCast(
   attributeCast: string,
 ): Promise<RawPicklistAttributeMeta[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const params: Record<string, any> = {
+  const baseParams: Record<string, any> = {
     organization: ORG_URL,
     accept: 'application/json',
     entityLogicalName,
     attributeCast,
     '$filter': 'IsCustomAttribute eq true',
     '$select': 'LogicalName',
-    '$expand': 'OptionSet($select=Name,IsGlobal),GlobalOptionSet($select=Name,IsGlobal)',
   }
 
-  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
-    connectorOperation: {
-      tableName: 'commondataserviceforapps',
-      operationName: 'GetEntityAttributesByCast',
-      parameters: params,
-    },
-  })
+  async function execute(expand: string) {
+    const params = { ...baseParams, '$expand': expand }
+    return client.executeAsync<typeof params, Record<string, unknown>>({
+      connectorOperation: {
+        tableName: 'commondataserviceforapps',
+        operationName: 'GetEntityAttributesByCast',
+        parameters: params,
+      },
+    })
+  }
+
+  let res = await execute('OptionSet($select=Name,IsGlobal,Options),GlobalOptionSet($select=Name,IsGlobal)')
+  if (!res.success) {
+    res = await execute('OptionSet($select=Name,IsGlobal),GlobalOptionSet($select=Name,IsGlobal)')
+  }
 
   if (!res.success) throw new Error(extractDvError(res))
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -585,6 +630,235 @@ export function fetchCustomPicklistAttributes(entityLogicalName: string) {
 
 export function fetchCustomMultiPicklistAttributes(entityLogicalName: string) {
   return fetchAttributesByCast(entityLogicalName, 'Microsoft.Dynamics.CRM.MultiSelectPicklistAttributeMetadata')
+}
+
+export interface AttributeOptionSetMetadata {
+  name?: string
+  metadataId?: string
+  isGlobal?: boolean
+  options: GlobalOptionSetMeta['options']
+  raw: Record<string, unknown>
+  source: 'explicit-picklist-cast' | 'explicit-multiselect-cast' | 'attribute-logical-name-cast' | 'attribute-cast' | 'connector-enum-with-organization'
+}
+
+export interface OptionSetDebugAttempt {
+  label: string
+  operationName: string
+  intendedUrl: string
+  success: boolean
+  selected?: boolean
+  error?: string
+  responseKeys?: string[]
+  optionSetName?: string
+  optionSetMetadataId?: string
+  isGlobal?: boolean
+  optionCount?: number
+  raw?: unknown
+}
+
+export interface OptionSetDebugResult {
+  selected: AttributeOptionSetMetadata | null
+  attempts: OptionSetDebugAttempt[]
+}
+
+type OptionSetRawResult = Omit<AttributeOptionSetMetadata, 'source'> & { source?: AttributeOptionSetMetadata['source'] }
+
+function parseAttributeOptionSetRaw(raw: Record<string, unknown>): OptionSetRawResult | null {
+  const optionSet = raw.OptionSet as ({ Name?: string; IsGlobal?: boolean; MetadataId?: string; Options?: RawOptionMetadata[] } | undefined)
+  const globalOptionSet = raw.GlobalOptionSet as ({ Name?: string; IsGlobal?: boolean; MetadataId?: string; Options?: RawOptionMetadata[] } | undefined)
+  const rawOptions = (
+    optionSet?.Options ??
+    globalOptionSet?.Options ??
+    (Array.isArray(raw.value) ? raw.value :
+      Array.isArray(raw.Options) ? raw.Options :
+      Array.isArray(raw.options) ? raw.options :
+      [])
+  ) as RawOptionMetadata[]
+  const options = parseOptionSetOptions(rawOptions)
+  const name = globalOptionSet?.Name ?? optionSet?.Name ?? (raw.Name ?? raw.name) as string | undefined
+  const metadataId = globalOptionSet?.MetadataId ?? optionSet?.MetadataId ?? (raw.MetadataId ?? raw.metadataId) as string | undefined
+  const isGlobal = globalOptionSet?.Name ? true : optionSet?.IsGlobal ?? (raw.IsGlobal ?? raw.isGlobal) as boolean | undefined
+
+  if (!name && !metadataId && options.length === 0) return null
+  return { name, metadataId, isGlobal, options, raw }
+}
+
+function optionSetCastName(type: 'Picklist' | 'MultiSelectPicklist'): string {
+  return type === 'MultiSelectPicklist'
+    ? 'Microsoft.Dynamics.CRM.MultiSelectPicklistAttributeMetadata'
+    : 'Microsoft.Dynamics.CRM.PicklistAttributeMetadata'
+}
+
+function debugAttemptFromRaw(
+  label: string,
+  operationName: string,
+  intendedUrl: string,
+  raw: Record<string, unknown>,
+  parsed: OptionSetRawResult | null,
+): OptionSetDebugAttempt {
+  return {
+    label,
+    operationName,
+    intendedUrl,
+    success: true,
+    responseKeys: Object.keys(raw),
+    optionSetName: parsed?.name,
+    optionSetMetadataId: parsed?.metadataId,
+    isGlobal: parsed?.isGlobal,
+    optionCount: parsed?.options.length ?? 0,
+    raw,
+  }
+}
+
+export async function fetchAttributeOptionSetMetadata(
+  entityLogicalName: string,
+  attributeMetadataId: string,
+  type: 'Picklist' | 'MultiSelectPicklist',
+  attributeLogicalName?: string,
+): Promise<AttributeOptionSetMetadata | null> {
+  const debug = await debugFetchAttributeOptionSetMetadata(entityLogicalName, attributeMetadataId, type, attributeLogicalName)
+  return debug.selected
+}
+
+export async function debugFetchAttributeOptionSetMetadata(
+  entityLogicalName: string,
+  attributeMetadataId: string,
+  type: 'Picklist' | 'MultiSelectPicklist',
+  attributeLogicalName?: string,
+): Promise<OptionSetDebugResult> {
+  const attempts: OptionSetDebugAttempt[] = []
+
+  async function run(
+    label: string,
+    operationName: string,
+    intendedUrl: string,
+    parameters: Record<string, unknown>,
+    source: AttributeOptionSetMetadata['source'],
+  ): Promise<AttributeOptionSetMetadata | null> {
+    try {
+      const res = await client.executeAsync<typeof parameters, Record<string, unknown>>({
+        connectorOperation: {
+          tableName: 'commondataserviceforapps',
+          operationName,
+          parameters,
+        },
+      })
+
+      if (!res.success) {
+        attempts.push({
+          label,
+          operationName,
+          intendedUrl,
+          success: false,
+          error: extractDvError(res),
+          raw: res,
+        })
+        return null
+      }
+
+      const raw = (res.data ?? {}) as Record<string, unknown>
+      const parsed = parseAttributeOptionSetRaw(raw)
+      const attempt = debugAttemptFromRaw(label, operationName, intendedUrl, raw, parsed)
+      attempts.push(attempt)
+      if (!parsed || parsed.options.length === 0) return null
+
+      attempt.selected = true
+      return { ...parsed, source }
+    } catch (e) {
+      attempts.push({
+        label,
+        operationName,
+        intendedUrl,
+        success: false,
+        error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+      })
+      return null
+    }
+  }
+
+  const attributeCast = optionSetCastName(type)
+
+  if (attributeLogicalName) {
+    const operationName = type === 'MultiSelectPicklist'
+      ? 'GetMultiSelectPicklistAttribute'
+      : 'GetPicklistAttribute'
+    const selected = await run(
+      type === 'MultiSelectPicklist'
+        ? 'Explicit MultiSelectPicklist attribute cast'
+        : 'Explicit Picklist attribute cast',
+      operationName,
+      `${ORG_URL}/api/data/v9.2/EntityDefinitions(LogicalName='${entityLogicalName}')` +
+      `/Attributes(LogicalName='${attributeLogicalName}')/${attributeCast}?$expand=OptionSet,GlobalOptionSet`,
+      {
+        organization: ORG_URL,
+        accept: 'application/json',
+        entityLogicalName,
+        attributeLogicalName,
+        '$expand': 'OptionSet,GlobalOptionSet',
+      },
+      type === 'MultiSelectPicklist' ? 'explicit-multiselect-cast' : 'explicit-picklist-cast',
+    )
+    if (selected) return { selected, attempts }
+  }
+
+  const connectorEnumUrl = `Connector enum metadata: ${ORG_URL}/${entityLogicalName}/${attributeMetadataId}/${type}`
+  const selectedByConnectorEnum = await run(
+    'Connector enum metadata with organization',
+    'GetOptionSetMetadataWithOrganization',
+    connectorEnumUrl,
+    {
+      organization: ORG_URL,
+      body: {
+        entityName: entityLogicalName,
+        attributeMetadataId,
+        type,
+      },
+    },
+    'connector-enum-with-organization',
+  )
+  if (selectedByConnectorEnum) return { selected: selectedByConnectorEnum, attempts }
+
+  if (attributeLogicalName) {
+    const intendedUrl =
+      `${ORG_URL}/api/data/v9.2/EntityDefinitions(LogicalName='${entityLogicalName}')` +
+      `/Attributes(LogicalName='${attributeLogicalName}')/${attributeCast}?$expand=OptionSet,GlobalOptionSet`
+    const selected = await run(
+      'Attribute cast by logical name',
+      'GetEntityAttributeByLogicalNameCast',
+      intendedUrl,
+      {
+        organization: ORG_URL,
+        accept: 'application/json',
+        entityLogicalName,
+        attributeLogicalName,
+        attributeCast,
+        '$expand': 'OptionSet,GlobalOptionSet',
+      },
+      'attribute-logical-name-cast',
+    )
+    if (selected) return { selected, attempts }
+  }
+
+  const byMetadataIdUrl =
+    `${ORG_URL}/api/data/v9.1.0/EntityDefinitions(LogicalName='${entityLogicalName}')` +
+    `/Attributes(${attributeMetadataId})/${attributeCast}?$expand=OptionSet,GlobalOptionSet`
+  const selectedByMetadataId = await run(
+    'Attribute cast by MetadataId',
+    'GetEntityAttributeByMetadataIdCast',
+    byMetadataIdUrl,
+    {
+      organization: ORG_URL,
+      accept: 'application/json',
+      entityLogicalName,
+      attributeMetadataId,
+      attributeCast,
+      '$expand': 'OptionSet,GlobalOptionSet',
+    },
+    'attribute-cast',
+  )
+  if (selectedByMetadataId) return { selected: selectedByMetadataId, attempts }
+
+  return { selected: null, attempts }
 }
 
 interface RawRelationshipMeta {
@@ -636,29 +910,7 @@ export async function fetchGlobalOptionSetFull(name: string): Promise<GlobalOpti
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = res.data as any
     const displayName = (raw?.DisplayName?.UserLocalizedLabel?.Label ?? name) as string
-    type RawLocalizedLabel = { Label?: unknown }
-    type RawOptionMetadata = {
-      Value?: unknown
-      Label?: {
-        UserLocalizedLabel?: { Label?: unknown }
-        LocalizedLabels?: RawLocalizedLabel[]
-      }
-    }
-    const options = ((raw?.Options ?? []) as RawOptionMetadata[]).map(o => {
-      const userLabel = typeof o.Label?.UserLocalizedLabel?.Label === 'string'
-        ? o.Label.UserLocalizedLabel.Label
-        : undefined
-      const localizedLabels = (o.Label?.LocalizedLabels ?? [])
-        .map(l => l.Label)
-        .filter((label): label is string => typeof label === 'string' && label.length > 0)
-      const labels = Array.from(new Set([userLabel, ...localizedLabels].filter((label): label is string => !!label)))
-      const value = typeof o.Value === 'number' ? o.Value : Number(o.Value)
-      return {
-        value,
-        label: labels[0] ?? String(value),
-        labels,
-      }
-    })
+    const options = parseOptionSetOptions((raw?.Options ?? []) as RawOptionMetadata[])
     return { name, displayName, options }
   } catch {
     return null

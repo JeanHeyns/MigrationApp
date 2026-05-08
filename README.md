@@ -56,14 +56,20 @@ Build:
 npm run build
 ```
 
+Push after building, depending on the machine:
+
+```bash
+# MacBook / this workspace
+node_modules/.bin/power-apps push
+```
+
+```powershell
+# Windows PC
+& 'C:\Users\jan-l\AppData\Local\Microsoft\PowerAppsCLI\pac.cmd' code push --environment 'https://dev-jehe.crm4.dynamics.com/'
+```
+
 Run locally:
 
 ```bash
 npm run dev
-```
-
-Push the code app with Power Platform CLI:
-
-```powershell
-& 'C:\Users\jan-l\AppData\Local\Microsoft\PowerAppsCLI\pac.cmd' code push --environment 'https://dev-jehe.crm4.dynamics.com/'
 ```

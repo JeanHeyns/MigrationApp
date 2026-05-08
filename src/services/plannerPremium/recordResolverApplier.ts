@@ -76,7 +76,8 @@ export function applyResolvers(
         const skipped: SkippedField = {
           poField: fieldKey,
           dvField,
-          reason: buildUnresolvedReason(resolver.fieldType, originalLabel, result.partialResolution),
+          reason: result.failureReason
+            ?? buildUnresolvedReason(resolver.fieldType, originalLabel, result.partialResolution),
           originalValue: poValue,
         }
         if (result.partialResolution) {

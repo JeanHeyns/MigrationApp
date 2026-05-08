@@ -17,7 +17,12 @@ export interface ColumnMeta {
   displayName: string
   type: ColumnMetaType
   isCustom: boolean
-  optionSetName?: string       // Picklist / MultiSelectPicklist — global option set only
+  optionSetName?: string       // Picklist / MultiSelectPicklist — global option set name when shared
+  optionSetMetadataId?: string
+  optionSetIsGlobal?: boolean  // false means local/bound to the attribute
+  isGlobalOptionSet?: boolean
+  optionSetOptions?: GlobalOptionSetMeta['options'] // local option set labels/values from attribute metadata
+  inlineOptions?: GlobalOptionSetMeta['options'] // direct attribute response options for global or local choices
   targets?: string[]           // Lookup — target entity logical names
   navigationProperty?: string  // Lookup — odata.bind property name
 }
@@ -52,6 +57,11 @@ export interface ResolverEntry {
   dvLogicalName: string
   dvType: ColumnMetaType
   optionSetName?: string
+  optionSetMetadataId?: string
+  optionSetIsGlobal?: boolean
+  isGlobalOptionSet?: boolean
+  optionSetOptions?: GlobalOptionSetMeta['options']
+  inlineOptions?: GlobalOptionSetMeta['options']
   sourceOptions?: ResolverChoiceSourceOption[]
   targetEntity?: string
   targetEntitySet?: string

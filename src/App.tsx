@@ -1,4 +1,4 @@
-import { FluentProvider, webLightTheme, makeStyles } from '@fluentui/react-components'
+import { Button, FluentProvider, webLightTheme, makeStyles } from '@fluentui/react-components'
 import { MigrationProvider, useMigration } from './app/MigrationContext'
 import { StepRouter } from './app/StepRouter'
 import { StepIndicator } from './components/StepIndicator'
@@ -17,7 +17,13 @@ const useStyles = makeStyles({
     padding: '12px 32px',
     display: 'flex',
     alignItems: 'center',
+    justifyContent: 'space-between',
     gap: '12px',
+  },
+  headerActions: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
   },
   headerTitle: {
     fontSize: '15px',
@@ -36,7 +42,7 @@ const useStyles = makeStyles({
 
 function WizardShell() {
   const styles = useStyles()
-  const { currentStep } = useMigration()
+  const { currentStep, setCurrentStep } = useMigration()
 
   return (
     <div className={styles.shell}>
@@ -44,6 +50,15 @@ function WizardShell() {
         <div>
           <div className={styles.headerTitle}>Project Online → Planner Premium Migration Tool</div>
           <div className={styles.headerSub}>Migrate projects, tasks, and resources to Project for the Web</div>
+        </div>
+        <div className={styles.headerActions}>
+          <Button
+            appearance={currentStep === 6 ? 'primary' : 'secondary'}
+            size="small"
+            onClick={() => setCurrentStep(6)}
+          >
+            Troubleshooting
+          </Button>
         </div>
       </header>
 

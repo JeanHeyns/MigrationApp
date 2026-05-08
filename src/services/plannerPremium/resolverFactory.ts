@@ -25,6 +25,7 @@ export interface ResolverResult {
   bindKey?: string              // e.g. "cr123_category@odata.bind"
   bindValue?: string            // e.g. "/cr123_categories(guid)"
   originalLabel?: string
+  failureReason?: string
   // Only set on unresolved multichoice with at least one matched label
   partialResolution?: {
     resolvedLabels: string[]
@@ -42,19 +43,31 @@ export interface BuildResolverMapResult {
   warnings: ResolverBuildWarning[]
 }
 
+export interface ResolverFactoryDeps {
+  fetchGlobalOptionSet: (name: string) => Promise<GlobalOptionSetMeta | null>
+}
+
 // ─── Module-level cache ───────────────────────────────────────────────────────
-// Keyed by option set name. Cleared on solution switch via clearResolverCaches().
+// Keyed by option set metadata ID when available, otherwise option set name.
+// Cleared on solution switch via clearResolverCaches().
 
 const optionSetCache = new Map<string, GlobalOptionSetMeta>()
+const optionSetRequestCache = new Map<string, Promise<GlobalOptionSetMeta | null>>()
+
+function isDebug(): boolean {
+  try { return localStorage.getItem('DEBUG_DATAONLY_WRITER') === '1' } catch { return false }
+}
 
 export function clearResolverCaches(): void {
   optionSetCache.clear()
+  optionSetRequestCache.clear()
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 export async function buildResolverMap(
   resolverPlan: ResolverPlan,
+  deps: ResolverFactoryDeps = { fetchGlobalOptionSet: fetchGlobalOptionSetFull },
 ): Promise<BuildResolverMapResult> {
   const resolvers = new Map<string, FieldResolver>()
   const warnings: ResolverBuildWarning[] = []
@@ -62,7 +75,7 @@ export async function buildResolverMap(
   await Promise.all(
     resolverPlan.fields.map(async entry => {
       try {
-        const resolver = await buildResolver(entry, warnings)
+        const resolver = await buildResolver(entry, warnings, deps)
         resolvers.set(entry.poFieldName, resolver)
       } catch (e) {
         warnings.push({
@@ -80,10 +93,14 @@ export async function buildResolverMap(
 
 // ─── Resolver dispatch ────────────────────────────────────────────────────────
 
-async function buildResolver(entry: ResolverEntry, warnings: ResolverBuildWarning[]): Promise<FieldResolver> {
+async function buildResolver(
+  entry: ResolverEntry,
+  warnings: ResolverBuildWarning[],
+  deps: ResolverFactoryDeps,
+): Promise<FieldResolver> {
   switch (entry.dvType) {
-    case 'Picklist':          return buildChoiceResolver(entry, warnings)
-    case 'MultiSelectPicklist': return buildMultiChoiceResolver(entry, warnings)
+    case 'Picklist':          return buildChoiceResolver(entry, warnings, deps)
+    case 'MultiSelectPicklist': return buildMultiChoiceResolver(entry, warnings, deps)
     case 'Lookup':            return buildLookupResolver(entry, warnings)
     default:                  return buildDirectResolver(entry)
   }
@@ -119,12 +136,34 @@ const normalize = (s: string) => s.toLowerCase().trim()
 
 async function fetchOptionSet(
   name: string,
+  cacheKey: string,
   field: string,
   warnings: ResolverBuildWarning[],
+  deps: ResolverFactoryDeps,
 ): Promise<GlobalOptionSetMeta | null> {
-  if (optionSetCache.has(name)) return optionSetCache.get(name)!
+  if (optionSetCache.has(cacheKey)) {
+    if (isDebug()) console.info('[dataOnly] option set cache hit', { field, name, cacheKey })
+    return optionSetCache.get(cacheKey)!
+  }
 
-  const optionSet = await fetchGlobalOptionSetFull(name)
+  let request = optionSetRequestCache.get(cacheKey)
+  if (!request) {
+    if (isDebug()) console.info('[dataOnly] fetching global option set', { field, name, cacheKey })
+    request = deps.fetchGlobalOptionSet(name).then(optionSet => {
+      if (optionSet) {
+        optionSetCache.set(cacheKey, optionSet)
+        optionSetCache.set(name, optionSet)
+      } else {
+        optionSetRequestCache.delete(cacheKey)
+      }
+      return optionSet
+    })
+    optionSetRequestCache.set(cacheKey, request)
+  } else if (isDebug()) {
+    console.info('[dataOnly] option set fetch in-flight', { field, name, cacheKey })
+  }
+
+  const optionSet = await request
   if (!optionSet) {
     warnings.push({
       severity: 'error',
@@ -134,8 +173,81 @@ async function fetchOptionSet(
     })
     return null
   }
+  optionSetCache.set(cacheKey, optionSet)
   optionSetCache.set(name, optionSet)
+  if (isDebug()) console.info('[dataOnly] fetched global option set', {
+    field,
+    name,
+    cacheKey,
+    optionCount: optionSet.options.length,
+    labelCount: optionSet.options.reduce((sum, opt) => sum + (opt.labels?.length || (opt.label ? 1 : 0)), 0),
+  })
   return optionSet
+}
+
+function inlineOptionSetFromEntry(entry: ResolverEntry): GlobalOptionSetMeta | null {
+  const options = entry.inlineOptions ?? entry.optionSetOptions ?? []
+  if (options.length === 0) return null
+
+  const name = entry.optionSetName ?? entry.optionSetMetadataId ?? `${entry.dvLogicalName} inline option set`
+  const cacheKey = optionSetCacheKey(entry)
+  const cached = optionSetCache.get(cacheKey)
+  if (cached) {
+    if (isDebug()) console.info('[dataOnly] inline option set cache hit', {
+      field: entry.poFieldName,
+      dvLogicalName: entry.dvLogicalName,
+      name,
+      cacheKey,
+    })
+    return cached
+  }
+
+  const optionSet = { name, displayName: name, options }
+  optionSetCache.set(cacheKey, optionSet)
+  if (entry.optionSetName) optionSetCache.set(entry.optionSetName, optionSet)
+
+  if (isDebug()) console.info('[dataOnly] using inline option set metadata', {
+    field: entry.poFieldName,
+    dvLogicalName: entry.dvLogicalName,
+    name,
+    cacheKey,
+    optionCount: options.length,
+  })
+
+  return optionSet
+}
+
+function missingLocalOptionSetMetadata(
+  entry: ResolverEntry,
+  warnings: ResolverBuildWarning[],
+): null {
+  const name = entry.optionSetName ?? `${entry.dvLogicalName} local option set`
+  warnings.push({
+    severity: 'error',
+    field: entry.poFieldName,
+    type: 'option_set_fetch_failed',
+    message: `Local option set "${name}" for Dataverse field "${entry.dvLogicalName}" did not include option metadata in the schema scan. Re-scan the target schema; if this persists, the Dataverse connector did not return bound option metadata for this field.`,
+  })
+  return null
+}
+
+function optionSetCacheKey(entry: ResolverEntry): string {
+  return entry.optionSetMetadataId ?? entry.optionSetName ?? entry.dvLogicalName
+}
+
+async function optionSetForEntry(
+  entry: ResolverEntry,
+  warnings: ResolverBuildWarning[],
+  deps: ResolverFactoryDeps,
+): Promise<GlobalOptionSetMeta | null> {
+  const inline = inlineOptionSetFromEntry(entry)
+  if (inline) return inline
+  if (entry.optionSetIsGlobal === false || entry.isGlobalOptionSet === false) {
+    return missingLocalOptionSetMetadata(entry, warnings)
+  }
+  return entry.optionSetName
+    ? fetchOptionSet(entry.optionSetName, optionSetCacheKey(entry), entry.poFieldName, warnings, deps)
+    : missingOptionSetResolverMetadata(entry, warnings)
 }
 
 function buildNormalizedOptionMap(optionSet: GlobalOptionSetMeta): Map<string, number> {
@@ -185,37 +297,58 @@ function buildChoiceValueMap(
     })
   }
 
+  if (isDebug()) console.info('[dataOnly] built choice value map', {
+    field: entry.poFieldName,
+    dvLogicalName: entry.dvLogicalName,
+    optionSetName: optionSet.name,
+    labelCount: valueMap.size,
+  })
+
   return valueMap
 }
 
 // ─── Choice resolver (Picklist) ───────────────────────────────────────────────
 
-async function buildChoiceResolver(entry: ResolverEntry, warnings: ResolverBuildWarning[]): Promise<FieldResolver> {
-  const optionSet = entry.optionSetName
-    ? await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
-    : missingOptionSetResolverMetadata(entry, warnings)
+async function buildChoiceResolver(
+  entry: ResolverEntry,
+  warnings: ResolverBuildWarning[],
+  deps: ResolverFactoryDeps,
+): Promise<FieldResolver> {
+  const optionSet = await optionSetForEntry(entry, warnings, deps)
   const map = optionSet ? buildChoiceValueMap(entry, optionSet, warnings) : new Map<string, number>()
+  const failureReason = optionSet ? undefined : optionSetFailureReason(entry)
 
   return {
     fieldType: 'Picklist',
     resolve: (poValue) => {
       if (poValue == null || poValue === '') return { status: 'empty' }
       const label = String(poValue)
-      const value = map.get(normalize(label))
+      const key = normalize(label)
+      const value = map.get(key)
+      if (isDebug()) console.info('[dataOnly] choice resolve', {
+        field: entry.poFieldName,
+        dvLogicalName: entry.dvLogicalName,
+        input: label,
+        key,
+        hit: value !== undefined,
+      })
       return value !== undefined
         ? { status: 'resolved', value, originalLabel: label }
-        : { status: 'unresolved', originalLabel: label }
+        : { status: 'unresolved', originalLabel: label, failureReason }
     },
   }
 }
 
 // ─── MultiChoice resolver (MultiSelectPicklist) ───────────────────────────────
 
-async function buildMultiChoiceResolver(entry: ResolverEntry, warnings: ResolverBuildWarning[]): Promise<FieldResolver> {
-  const optionSet = entry.optionSetName
-    ? await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
-    : missingOptionSetResolverMetadata(entry, warnings)
+async function buildMultiChoiceResolver(
+  entry: ResolverEntry,
+  warnings: ResolverBuildWarning[],
+  deps: ResolverFactoryDeps,
+): Promise<FieldResolver> {
+  const optionSet = await optionSetForEntry(entry, warnings, deps)
   const map = optionSet ? buildChoiceValueMap(entry, optionSet, warnings) : new Map<string, number>()
+  const failureReason = optionSet ? undefined : optionSetFailureReason(entry)
 
   return {
     fieldType: 'MultiSelectPicklist',
@@ -228,7 +361,15 @@ async function buildMultiChoiceResolver(entry: ResolverEntry, warnings: Resolver
       const values: number[] = []
 
       for (const label of labels) {
-        const v = map.get(normalize(label))
+        const key = normalize(label)
+        const v = map.get(key)
+        if (isDebug()) console.info('[dataOnly] multi choice resolve item', {
+          field: entry.poFieldName,
+          dvLogicalName: entry.dvLogicalName,
+          input: label,
+          key,
+          hit: v !== undefined,
+        })
         if (v !== undefined) {
           values.push(v)
           resolvedLabels.push(label)
@@ -241,7 +382,7 @@ async function buildMultiChoiceResolver(entry: ResolverEntry, warnings: Resolver
         return { status: 'resolved', value: values.join(','), originalLabel: raw }
       }
       if (failedLabels.length === labels.length) {
-        return { status: 'unresolved', originalLabel: raw }
+        return { status: 'unresolved', originalLabel: raw, failureReason }
       }
       // Partial: some resolved, some not — strict unresolved with detail for Step 5
       return {
@@ -266,6 +407,14 @@ function missingOptionSetResolverMetadata(
     message: `Choice field "${entry.poFieldName}" is missing global option set metadata for Dataverse field "${entry.dvLogicalName}". All values will be unresolvable.`,
   })
   return null
+}
+
+function optionSetFailureReason(entry: ResolverEntry): string {
+  if (entry.optionSetIsGlobal === false) {
+    return `Option set metadata for local Dataverse field "${entry.dvLogicalName}" could not be loaded; value resolution was skipped at the option-set level.`
+  }
+  const name = entry.optionSetName ?? '(missing)'
+  return `Option set "${name}" for Dataverse field "${entry.dvLogicalName}" could not be fetched; value resolution was skipped at the option-set level.`
 }
 
 const LARGE_TABLE_THRESHOLD = 5000
