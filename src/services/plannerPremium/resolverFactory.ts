@@ -9,6 +9,7 @@ export type ResolverBuildWarningType =
   | 'option_set_fetch_failed'
   | 'lookup_fetch_failed'
   | 'incomplete_resolver_metadata'
+  | 'choice_value_unmapped'
 
 export interface ResolverBuildWarning {
   severity: 'warn' | 'error'
@@ -140,10 +141,51 @@ async function fetchOptionSet(
 function buildNormalizedOptionMap(optionSet: GlobalOptionSetMeta): Map<string, number> {
   const map = new Map<string, number>()
   for (const opt of optionSet.options) {
-    const key = normalize(opt.label)
-    if (!map.has(key)) map.set(key, opt.value)
+    const labels = opt.labels?.length ? opt.labels : [opt.label]
+    for (const label of labels) {
+      const key = normalize(label)
+      if (!map.has(key)) map.set(key, opt.value)
+    }
   }
   return map
+}
+
+function buildChoiceValueMap(
+  entry: ResolverEntry,
+  optionSet: GlobalOptionSetMeta,
+  warnings: ResolverBuildWarning[],
+): Map<string, number> {
+  const optionLabels = buildNormalizedOptionMap(optionSet)
+  const valueMap = new Map(optionLabels)
+  const unmapped: string[] = []
+
+  for (const source of entry.sourceOptions ?? []) {
+    const matched = source.labels
+      .map(label => optionLabels.get(normalize(label)))
+      .find((value): value is number => value !== undefined)
+
+    if (matched === undefined) {
+      unmapped.push(source.labels[0] ?? source.id)
+      continue
+    }
+
+    valueMap.set(normalize(source.id), matched)
+    for (const label of source.labels) {
+      valueMap.set(normalize(label), matched)
+    }
+  }
+
+  if (unmapped.length > 0) {
+    warnings.push({
+      severity: 'warn',
+      field: entry.poFieldName,
+      type: 'choice_value_unmapped',
+      message: `${unmapped.length} Project Online choice value(s) could not be matched in global option set "${optionSet.name}".`,
+      details: unmapped,
+    })
+  }
+
+  return valueMap
 }
 
 // ─── Choice resolver (Picklist) ───────────────────────────────────────────────
@@ -152,7 +194,7 @@ async function buildChoiceResolver(entry: ResolverEntry, warnings: ResolverBuild
   const optionSet = entry.optionSetName
     ? await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
     : missingOptionSetResolverMetadata(entry, warnings)
-  const map = optionSet ? buildNormalizedOptionMap(optionSet) : new Map<string, number>()
+  const map = optionSet ? buildChoiceValueMap(entry, optionSet, warnings) : new Map<string, number>()
 
   return {
     fieldType: 'Picklist',
@@ -173,7 +215,7 @@ async function buildMultiChoiceResolver(entry: ResolverEntry, warnings: Resolver
   const optionSet = entry.optionSetName
     ? await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
     : missingOptionSetResolverMetadata(entry, warnings)
-  const map = optionSet ? buildNormalizedOptionMap(optionSet) : new Map<string, number>()
+  const map = optionSet ? buildChoiceValueMap(entry, optionSet, warnings) : new Map<string, number>()
 
   return {
     fieldType: 'MultiSelectPicklist',

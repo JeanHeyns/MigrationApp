@@ -20,7 +20,6 @@ export async function inspectSolution(
     entities[schema.logicalName] = schema
   }
 
-  // optionSetName is undefined at this stage — populated when resolvers are built (phase 5+)
   return {
     scannedAt: new Date(),
     solutionId,

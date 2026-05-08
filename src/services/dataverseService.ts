@@ -636,11 +636,29 @@ export async function fetchGlobalOptionSetFull(name: string): Promise<GlobalOpti
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = res.data as any
     const displayName = (raw?.DisplayName?.UserLocalizedLabel?.Label ?? name) as string
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const options = ((raw?.Options ?? []) as any[]).map(o => ({
-      value: o.Value as number,
-      label: (o.Label?.UserLocalizedLabel?.Label ?? String(o.Value)) as string,
-    }))
+    type RawLocalizedLabel = { Label?: unknown }
+    type RawOptionMetadata = {
+      Value?: unknown
+      Label?: {
+        UserLocalizedLabel?: { Label?: unknown }
+        LocalizedLabels?: RawLocalizedLabel[]
+      }
+    }
+    const options = ((raw?.Options ?? []) as RawOptionMetadata[]).map(o => {
+      const userLabel = typeof o.Label?.UserLocalizedLabel?.Label === 'string'
+        ? o.Label.UserLocalizedLabel.Label
+        : undefined
+      const localizedLabels = (o.Label?.LocalizedLabels ?? [])
+        .map(l => l.Label)
+        .filter((label): label is string => typeof label === 'string' && label.length > 0)
+      const labels = Array.from(new Set([userLabel, ...localizedLabels].filter((label): label is string => !!label)))
+      const value = typeof o.Value === 'number' ? o.Value : Number(o.Value)
+      return {
+        value,
+        label: labels[0] ?? String(value),
+        labels,
+      }
+    })
     return { name, displayName, options }
   } catch {
     return null

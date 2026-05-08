@@ -32,7 +32,12 @@ export interface EntitySchema {
 export interface GlobalOptionSetMeta {
   name: string
   displayName: string
-  options: Array<{ value: number; label: string }>
+  options: Array<{ value: number; label: string; labels?: string[] }>
+}
+
+export interface ResolverChoiceSourceOption {
+  id: string
+  labels: string[]
 }
 
 export interface SchemaSnapshot {
@@ -47,6 +52,7 @@ export interface ResolverEntry {
   dvLogicalName: string
   dvType: ColumnMetaType
   optionSetName?: string
+  sourceOptions?: ResolverChoiceSourceOption[]
   targetEntity?: string
   targetEntitySet?: string
   primaryNameField?: string

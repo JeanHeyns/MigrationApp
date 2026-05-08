@@ -25,7 +25,7 @@ import {
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { fetchResourcesByIds } from '../../services/projectOnline/resources'
 import { lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
-import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoResource } from '../../models/projectOnline.types'
+import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoLookupTable, PoResource } from '../../models/projectOnline.types'
 import type { DataverseColumnType, FieldMapping, MappingConfiguration, OwnerMapping } from '../../models/mapping.types'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
 import type { ColumnMeta, ColumnMetaType, EntitySchema, ResolverEntry, ResolverPlan, SchemaSnapshot } from '../../models/dataOnly.types'
@@ -149,16 +149,21 @@ function autoMatchColumn(cf: PoCustomField, compatible: ColumnMeta[], prefix: st
 }
 
 function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, prefix: string): FieldMapping[] {
+  const lookupMap = new Map(data.lookupTables.map(lt => [lt.LookupTableUID, lt]))
   return data.customFields.map(cf => {
     const dvEntityKey = PO_ENTITY_TO_DV[cf.CustomFieldEntityType]
     const dvEntity = dvEntityKey ? snapshot.entities[dvEntityKey] : undefined
     const compatible = dvEntity ? getCompatibleColumns(dvEntity, cf.CustomFieldType) : []
+    const lookupTable = cf.CustomFieldLookupTableUID
+      ? lookupMap.get(cf.CustomFieldLookupTableUID)
+      : undefined
 
     if (compatible.length === 0) {
       return {
         customField: cf,
         targetColumnType: SUGGESTED_DV_TYPE[cf.CustomFieldType],
         targetLogicalName: toLogicalName(cf.CustomFieldName, prefix),
+        lookupTable,
         skip: true,
         migrateValue: false,
         useExistingField: false,
@@ -171,6 +176,7 @@ function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, pr
         customField: cf,
         targetColumnType: SCHEMA_TYPE_TO_DV_TYPE[matched.type] ?? SUGGESTED_DV_TYPE[cf.CustomFieldType],
         targetLogicalName: matched.logicalName,
+        lookupTable,
         skip: false,
         migrateValue: true,
         useExistingField: true,
@@ -182,6 +188,7 @@ function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, pr
       customField: cf,
       targetColumnType: SUGGESTED_DV_TYPE[cf.CustomFieldType],
       targetLogicalName: toLogicalName(cf.CustomFieldName, prefix),
+      lookupTable,
       skip: false,
       migrateValue: false,
       useExistingField: false,
@@ -189,8 +196,33 @@ function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, pr
   })
 }
 
-function buildResolverPlanFromMappings(mappings: FieldMapping[], snapshot: SchemaSnapshot): ResolverPlan {
+function sourceOptionsForMapping(
+  mapping: FieldMapping,
+  lookupTables: Map<string, PoLookupTable>,
+): ResolverEntry['sourceOptions'] {
+  const lookupTable = mapping.lookupTable
+    ?? (mapping.customField.CustomFieldLookupTableUID
+      ? lookupTables.get(mapping.customField.CustomFieldLookupTableUID)
+      : undefined)
+
+  if (!lookupTable) return undefined
+
+  return lookupTable.entries.map(entry => ({
+    id: entry.LookupEntryUID,
+    labels: Array.from(new Set([
+      entry.LookupEntryFullValue,
+      entry.LookupEntryValue,
+    ].filter((label): label is string => typeof label === 'string' && label.length > 0))),
+  }))
+}
+
+function buildResolverPlanFromMappings(
+  mappings: FieldMapping[],
+  snapshot: SchemaSnapshot,
+  lookupTables: PoLookupTable[] = [],
+): ResolverPlan {
   const fields: ResolverEntry[] = []
+  const lookupTableMap = new Map(lookupTables.map(lt => [lt.LookupTableUID, lt]))
   for (const m of mappings) {
     if (m.skip || !m.useExistingField || !m.targetLogicalName) continue
     const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
@@ -200,11 +232,13 @@ function buildResolverPlanFromMappings(mappings: FieldMapping[], snapshot: Schem
     if (!col) continue
     const targetEntity = col.targets?.[0]
     const targetEntityObj = targetEntity ? snapshot.entities[targetEntity] : undefined
+    const isChoice = col.type === 'Picklist' || col.type === 'MultiSelectPicklist'
     fields.push({
       poFieldName:      m.customField.ODataFieldName ?? m.customField.CustomFieldName,
       dvLogicalName:    m.targetLogicalName,
       dvType:           col.type,
-      optionSetName:    m.optionSetName ?? col.optionSetName,
+      optionSetName:    isChoice ? col.optionSetName : undefined,
+      sourceOptions:    isChoice ? sourceOptionsForMapping(m, lookupTableMap) : undefined,
       targetEntity,
       targetEntitySet:  targetEntityObj?.entitySetName,
       primaryNameField: targetEntityObj?.primaryNameField,
@@ -676,7 +710,7 @@ export function Step2Mapping() {
     }
     setMappingConfig(config)
     if (migrationMode === 'dataOnly' && schemaSnapshot) {
-      setResolverPlan(buildResolverPlanFromMappings(fieldMappings, schemaSnapshot))
+      setResolverPlan(buildResolverPlanFromMappings(fieldMappings, schemaSnapshot, fetchedData?.lookupTables ?? []))
     }
     nextStep()
   }

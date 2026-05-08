@@ -70,7 +70,7 @@ export async function writeTasks(
         try {
           const taskId = sourceGuidOrNew(task.TaskId)
           taskIdMap[task.TaskId] = taskId
-          await queueScheduleCreate(operationSetId, buildTaskEntity(task, taskId, dvProjectId, bucket, taskIdMap))
+          await queueScheduleCreate(operationSetId, buildTaskEntity(task, taskId, dvProjectId, bucket))
           queued += 1
           queuedResults.push({ poTaskId: task.TaskId, dvTaskId: taskId, success: true })
         } catch (e) {
@@ -285,10 +285,7 @@ function buildTaskEntity(
   taskId: string,
   projectId: string,
   bucketId: string,
-  taskIdMap: Record<string, string>,
 ) {
-  const parentId = task.TaskParentId ? taskIdMap[task.TaskParentId] : undefined
-
   return {
     '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_projecttask',
     msdyn_projecttaskid: taskId,
@@ -299,7 +296,6 @@ function buildTaskEntity(
     msdyn_scheduledend: task.TaskFinishDate,
     msdyn_start: task.TaskStartDate,
     msdyn_duration: task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes,
-    ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {}),
-    ...(parentId ? { 'msdyn_parenttask@odata.bind': `/msdyn_projecttasks(${parentId})` } : {}),
+    ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {})
   }
 }
