@@ -2,8 +2,11 @@ import type { PoTask } from '../../models/projectOnline.types'
 import type { MappingConfiguration, OptionSetMapping } from '../../models/mapping.types'
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords } from './dataverseClient'
-import { chunks, cleanGuid, getRecordId, nowError } from './importHelpers'
+import { chunks, cleanGuid, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
 import { createOperationSet, executeOperationSet, queueScheduleCreate, queueScheduleDelete } from './scheduleApi'
+
+const TASK_MATERIALIZATION_MAX_ATTEMPTS = 5
+const TASK_MATERIALIZATION_DELAY_MS = 5000
 
 export interface TaskWriteResult {
   poTaskId: string
@@ -65,7 +68,7 @@ export async function writeTasks(
 
       for (const task of chunk) {
         try {
-          const taskId = crypto.randomUUID()
+          const taskId = sourceGuidOrNew(task.TaskId)
           taskIdMap[task.TaskId] = taskId
           await queueScheduleCreate(operationSetId, buildTaskEntity(task, taskId, dvProjectId, bucket, taskIdMap))
           queued += 1
@@ -97,9 +100,87 @@ export async function writeTasks(
         }
       }
     }
+
+    await remapMaterializedTaskIds(dvProjectId, pending, results)
   }
 
   return results
+}
+
+async function remapMaterializedTaskIds(
+  projectId: string,
+  tasks: PoTask[],
+  results: TaskWriteResult[],
+): Promise<void> {
+  const poTaskIds = new Set(tasks.map(task => task.TaskId))
+  const projectResults = results.filter(result => result.success && result.dvTaskId && poTaskIds.has(result.poTaskId))
+  if (projectResults.length === 0) return
+
+  const rows = await waitForMaterializedTasks(projectId, projectResults.length)
+  const existingIds = new Set(rows.map(row => cleanGuid(getRecordId(row, 'msdyn_projecttaskid'))).filter(Boolean))
+  const usedIds = new Set<string>()
+
+  for (const result of projectResults) {
+    const currentId = cleanGuid(result.dvTaskId)
+    if (currentId && existingIds.has(currentId)) {
+      usedIds.add(currentId)
+      continue
+    }
+
+    const task = tasks.find(t => t.TaskId === result.poTaskId)
+    if (!task) continue
+
+    const match = rows.find(row => {
+      const id = cleanGuid(getRecordId(row, 'msdyn_projecttaskid'))
+      return !!id &&
+        !usedIds.has(id) &&
+        String(row.msdyn_subject ?? '') === task.TaskName &&
+        sameDate(row.msdyn_scheduledstart, task.TaskStartDate) &&
+        sameDate(row.msdyn_scheduledend, task.TaskFinishDate) &&
+        sameDuration(row.msdyn_duration, task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes)
+    })
+
+    const materializedId = cleanGuid(getRecordId(match ?? {}, 'msdyn_projecttaskid'))
+    if (materializedId) {
+      result.dvTaskId = materializedId
+      usedIds.add(materializedId)
+    }
+  }
+}
+
+async function waitForMaterializedTasks(projectId: string, expectedCount: number): Promise<Record<string, unknown>[]> {
+  let rows: Record<string, unknown>[] = []
+
+  for (let attempt = 1; attempt <= TASK_MATERIALIZATION_MAX_ATTEMPTS; attempt += 1) {
+    rows = await listRecords(
+      'msdyn_projecttasks',
+      'msdyn_projecttaskid,msdyn_subject,msdyn_scheduledstart,msdyn_scheduledend,msdyn_duration,_msdyn_project_value',
+      `_msdyn_project_value eq ${projectId}`,
+      5000,
+    )
+
+    if (rows.length >= expectedCount) return rows
+    if (attempt < TASK_MATERIALIZATION_MAX_ATTEMPTS) {
+      await sleep(TASK_MATERIALIZATION_DELAY_MS)
+    }
+  }
+
+  return rows
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function sameDate(left: unknown, right: unknown): boolean {
+  if (!left && !right) return true
+  if (!left || !right) return false
+  return String(left).slice(0, 10) === String(right).slice(0, 10)
+}
+
+function sameDuration(left: unknown, right: unknown): boolean {
+  if (left == null && right == null) return true
+  return Number(left ?? 0) === Number(right ?? 0)
 }
 
 function isProjectSummaryTask(task: PoTask): boolean {
@@ -218,6 +299,8 @@ function buildTaskEntity(
     msdyn_scheduledend: task.TaskFinishDate,
     msdyn_start: task.TaskStartDate,
     msdyn_duration: task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes,
+    ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {}),
+    ...(task.TaskOutlineNumber ? { msdyn_outlinenumber: task.TaskOutlineNumber } : {}),
     ...(parentId ? { 'msdyn_parenttask@odata.bind': `/msdyn_projecttasks(${parentId})` } : {}),
   }
 }

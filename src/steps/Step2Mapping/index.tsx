@@ -204,7 +204,7 @@ function buildResolverPlanFromMappings(mappings: FieldMapping[], snapshot: Schem
       poFieldName:      m.customField.ODataFieldName ?? m.customField.CustomFieldName,
       dvLogicalName:    m.targetLogicalName,
       dvType:           col.type,
-      optionSetName:    col.optionSetName,
+      optionSetName:    m.optionSetName ?? col.optionSetName,
       targetEntity,
       targetEntitySet:  targetEntityObj?.entitySetName,
       primaryNameField: targetEntityObj?.primaryNameField,

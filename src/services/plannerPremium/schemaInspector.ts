@@ -1,5 +1,9 @@
 import type { SchemaSnapshot, EntitySchema, ColumnMeta, ColumnMetaType } from '../../models/dataOnly.types'
-import { fetchEntityWithCustomAttributes } from '../dataverseService'
+import {
+  fetchCustomMultiPicklistAttributes,
+  fetchCustomPicklistAttributes,
+  fetchEntityWithCustomAttributes,
+} from '../dataverseService'
 
 const DEFAULT_TARGET_ENTITIES = ['msdyn_project', 'msdyn_projecttask', 'msdyn_projectteam']
 
@@ -32,6 +36,19 @@ async function inspectEntity(entityLogicalName: string): Promise<EntitySchema> {
   const data = await fetchEntityWithCustomAttributes(entityLogicalName)
 
   const attributes: ColumnMeta[] = []
+  const [picklists, multiPicklists] = await Promise.all([
+    fetchCustomPicklistAttributes(entityLogicalName).catch(() => []),
+    fetchCustomMultiPicklistAttributes(entityLogicalName).catch(() => []),
+  ])
+  const optionSetNames = new Map<string, string>()
+  for (const attr of [...picklists, ...multiPicklists]) {
+    const globalName = attr.GlobalOptionSet?.Name
+      ?? (attr.OptionSet?.IsGlobal ? attr.OptionSet.Name : undefined)
+    if (globalName) {
+      optionSetNames.set(attr.LogicalName, globalName)
+    }
+  }
+
   for (const raw of data.rawAttrs) {
     const type = mapAttributeType(raw.AttributeType, raw.AttributeTypeName?.Value)
     if (!type) continue
@@ -40,7 +57,8 @@ async function inspectEntity(entityLogicalName: string): Promise<EntitySchema> {
       displayName:  raw.DisplayName?.UserLocalizedLabel?.Label ?? raw.LogicalName,
       type,
       isCustom:     true,
-      // optionSetName, targets, navigationProperty filled in phase 5
+      optionSetName: optionSetNames.get(raw.LogicalName),
+      // Lookup navigation metadata is filled later when lookup migration is enabled.
     })
   }
 

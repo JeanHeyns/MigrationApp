@@ -18,6 +18,13 @@ export function cleanGuid(id: string | undefined): string | undefined {
   return id?.replace(/[{}]/g, '')
 }
 
+export function sourceGuidOrNew(id: string | undefined): string {
+  const clean = cleanGuid(id)?.toLowerCase()
+  return clean && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(clean)
+    ? clean
+    : crypto.randomUUID()
+}
+
 function getSourceValue(source: Record<string, unknown>, mapping: FieldMapping): unknown {
   const fieldName = mapping.customField.ODataFieldName
   if (fieldName && source[fieldName] !== undefined) return source[fieldName]

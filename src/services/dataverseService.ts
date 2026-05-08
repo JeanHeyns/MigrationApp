@@ -545,9 +545,10 @@ export async function fetchCustomEntityAttributes(entityLogicalName: string): Pr
   return (((res.data as any)?.value ?? []) as RawAttributeMeta[])
 }
 
-interface RawPicklistAttributeMeta {
+export interface RawPicklistAttributeMeta {
   LogicalName: string
   OptionSet?: { Name?: string; IsGlobal?: boolean }
+  GlobalOptionSet?: { Name?: string; IsGlobal?: boolean }
 }
 
 async function fetchAttributesByCast(
@@ -562,7 +563,7 @@ async function fetchAttributesByCast(
     attributeCast,
     '$filter': 'IsCustomAttribute eq true',
     '$select': 'LogicalName',
-    '$expand': 'OptionSet($select=Name,IsGlobal)',
+    '$expand': 'OptionSet($select=Name,IsGlobal),GlobalOptionSet($select=Name,IsGlobal)',
   }
 
   const res = await client.executeAsync<typeof params, Record<string, unknown>>({

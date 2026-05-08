@@ -15,6 +15,8 @@ export interface PoProject {
   ProjectStartDate?: string
   ProjectFinishDate?: string
   ProjectStatus?: string
+  ProjectType?: number
+  ProjectIsAdministrative?: boolean
   ProjectOwnerResourceId?: string   // _api/ProjectData/Projects field name
   ProjectOwnerResourceUid?: string  // fallback alias some tenants return
   [key: string]: unknown
@@ -59,6 +61,18 @@ export interface PoAssignment {
   [key: string]: unknown
 }
 
+export type PoDependencyType = 'FF' | 'FS' | 'SF' | 'SS'
+
+export interface PoTaskDependency {
+  DependencyId: string
+  ProjectId: string
+  PredecessorTaskId: string
+  SuccessorTaskId: string
+  DependencyType?: PoDependencyType
+  Lag?: number
+  [key: string]: unknown
+}
+
 export interface PoProjectTeamMember {
   ProjectId: string
   ResourceUID: string
@@ -95,6 +109,7 @@ export interface PoFetchedData {
   pwaUrl: string
   projects: PoProject[]
   tasks: PoTask[]
+  dependencies: PoTaskDependency[]
   resources: PoResource[]
   assignments: PoAssignment[]
   teamMembers: PoProjectTeamMember[]

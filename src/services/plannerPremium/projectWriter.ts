@@ -4,7 +4,7 @@ import type { ImportError } from '../../models/plannerPremium.types'
 import type { FieldResolver } from './resolverFactory'
 import type { SkippedField } from './recordResolverApplier'
 import { listRecords, performUnboundAction, patchRecord } from './dataverseClient'
-import { cleanGuid, customFieldPayload, escapeODataString, getRecordId, nowError } from './importHelpers'
+import { cleanGuid, customFieldPayload, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
 import { projectOnlineIdColumnName } from './columnManager'
 import { applyResolvers } from './recordResolverApplier'
 
@@ -78,6 +78,7 @@ export async function writeProjects(
       const body = {
         Project: {
           '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_project',
+          msdyn_projectid: sourceGuidOrNew(project.ProjectId),
           msdyn_subject: project.ProjectName,
           msdyn_description: project.ProjectDescription,
           msdyn_scheduledstart: project.ProjectStartDate,

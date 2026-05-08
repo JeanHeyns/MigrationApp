@@ -58,6 +58,7 @@ export function applyResolvers(
     }
 
     const result = resolver.resolve(poValue)
+    const originalLabel = result.originalLabel ?? (poValue == null ? undefined : String(poValue))
 
     switch (result.status) {
       case 'empty':
@@ -75,7 +76,7 @@ export function applyResolvers(
         const skipped: SkippedField = {
           poField: fieldKey,
           dvField,
-          reason: buildUnresolvedReason(resolver.fieldType, result.originalLabel, result.partialResolution),
+          reason: buildUnresolvedReason(resolver.fieldType, originalLabel, result.partialResolution),
           originalValue: poValue,
         }
         if (result.partialResolution) {

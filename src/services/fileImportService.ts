@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx'
 import type {
-  PoFetchedData, PoProject, PoTask, PoResource, PoAssignment,
+  PoFetchedData, PoProject, PoTask, PoResource, PoAssignment, PoTaskDependency,
   PoProjectTeamMember, PoCustomField, PoLookupTable, PoCustomFieldType,
 } from '../models/projectOnline.types'
 
@@ -26,6 +26,10 @@ const TEMPLATE_DATA: Record<string, unknown[][]> = {
     ['ProjectId', 'TaskId', 'ResourceId', 'Units'],
     ['P001', 'T002', 'R001', 100],
     ['P001', 'T002', 'R002',  50],
+  ],
+  Dependencies: [
+    ['DependencyId', 'ProjectId', 'PredecessorTaskId', 'SuccessorTaskId', 'DependencyType'],
+    ['D001', 'P001', 'T002', 'T003', 'FS'],
   ],
   TeamMembers: [
     ['ProjectId', 'ResourceId'],
@@ -243,7 +247,18 @@ function parseSheets(wb: XLSX.WorkBook): PoFetchedData {
       AssignmentUnits:     num(r.Units),
     }))
 
-  // ── 7. TeamMembers ───────────────────────────────────────────────────────
+  // ── 7. Dependencies ──────────────────────────────────────────────────────
+  const dependencies: PoTaskDependency[] = sheetToRows(wb, 'Dependencies')
+    .filter(r => str(r.ProjectId) && str(r.PredecessorTaskId) && str(r.SuccessorTaskId))
+    .map((r, i) => ({
+      DependencyId:       str(r.DependencyId) || `d_${i}`,
+      ProjectId:          str(r.ProjectId),
+      PredecessorTaskId:  str(r.PredecessorTaskId),
+      SuccessorTaskId:    str(r.SuccessorTaskId),
+      DependencyType:     normalizeDependencyType(str(r.DependencyType)),
+    }))
+
+  // ── 8. TeamMembers ───────────────────────────────────────────────────────
   const teamMembers: PoProjectTeamMember[] = sheetToRows(wb, 'TeamMembers')
     .filter(r => str(r.ProjectId) && str(r.ResourceId))
     .map(r => {
@@ -260,10 +275,17 @@ function parseSheets(wb: XLSX.WorkBook): PoFetchedData {
     pwaUrl: '',
     projects,
     tasks,
+    dependencies,
     resources,
     assignments,
     teamMembers,
     customFields,
     lookupTables,
   }
+}
+
+function normalizeDependencyType(value: string): PoTaskDependency['DependencyType'] {
+  const normalized = value.toUpperCase()
+  if (normalized === 'FF' || normalized === 'FS' || normalized === 'SF' || normalized === 'SS') return normalized
+  return 'FS'
 }

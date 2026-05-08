@@ -13,6 +13,7 @@ import { useMigration } from '../../app/MigrationContext'
 import { writeResources } from '../../services/plannerPremium/resourceWriter'
 import { writeProjects } from '../../services/plannerPremium/projectWriter'
 import { writeTasks } from '../../services/plannerPremium/taskWriter'
+import { writeDependencies } from '../../services/plannerPremium/dependencyWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
 import { buildResolverMap, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
 import type { FieldResolver } from '../../services/plannerPremium/resolverFactory'
@@ -55,7 +56,7 @@ const useStyles = makeStyles({
   },
 })
 
-type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Projects' | 'Team members' | 'Tasks' | 'Assignments' | 'Done' | 'Failed'
+type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Projects' | 'Team members' | 'Tasks' | 'Dependencies' | 'Assignments' | 'Done' | 'Failed'
 
 export function Step4Import() {
   const styles = useStyles()
@@ -76,6 +77,7 @@ export function Step4Import() {
   const [total, setTotal] = useState(0)
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
+  const [includeDependencies, setIncludeDependencies] = useState(true)
   const logRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -103,6 +105,10 @@ export function Step4Import() {
   const selectedAssignments = useMemo(() =>
     fetchedData?.assignments.filter(a => selectedProjectIdLookup.has(a.ProjectId)) ?? [],
     [fetchedData?.assignments, selectedProjectIdLookup],
+  )
+  const selectedDependencies = useMemo(() =>
+    fetchedData?.dependencies.filter(d => selectedProjectIdLookup.has(d.ProjectId)) ?? [],
+    [fetchedData?.dependencies, selectedProjectIdLookup],
   )
 
   if (!fetchedData || !mappingConfig) {
@@ -158,6 +164,7 @@ export function Step4Import() {
       selectedProjects.length +
       selectedTeamMembers.length +
       selectedTasks.length +
+      (includeDependencies ? selectedDependencies.length : 0) +
       selectedAssignments.length
     setTotal(workTotal)
     setCompleted(0)
@@ -248,6 +255,16 @@ export function Step4Import() {
       addImportResult(makeResult('Tasks', taskResults.length, taskResults.flatMap(r => r.error ? [r.error] : [])))
       const taskIdMap = Object.fromEntries(taskResults.filter(r => r.success && r.dvTaskId).map(r => [r.poTaskId, r.dvTaskId as string]))
 
+      if (includeDependencies && selectedDependencies.length > 0) {
+        setPhase('Dependencies')
+        appendLog(`Importing ${selectedDependencies.length} dependencies through Project schedule OperationSets`)
+        const dependencyResults = await writeDependencies(selectedDependencies, projectIdMap, taskIdMap, r => {
+          setCompleted(c => c + 1)
+          appendLog(`${r.success ? 'OK' : 'SKIP'} dependency ${r.poDependencyId}${r.error ? `: ${r.error.message}` : ''}`)
+        })
+        addImportResult(makeResult('Dependencies', dependencyResults.length, dependencyResults.flatMap(r => r.error ? [r.error] : [])))
+      }
+
       setPhase('Assignments')
       appendLog(`Importing ${selectedAssignments.length} assignments through Project schedule OperationSets`)
       const assignmentResults = await writeAssignments(selectedAssignments, projectIdMap, taskIdMap, teamMemberIdMap, r => {
@@ -293,6 +310,13 @@ export function Step4Import() {
         disabled={running}
         label="I understand selected project schedules will be cleared and rebuilt"
         onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
+      />
+
+      <Checkbox
+        checked={includeDependencies}
+        disabled={running || selectedDependencies.length === 0}
+        label={`Import dependencies${selectedDependencies.length > 0 ? ` (${selectedDependencies.length})` : ' (none found)'}`}
+        onChange={(_, d) => setIncludeDependencies(!!d.checked)}
       />
 
       <div className={styles.toolbar}>

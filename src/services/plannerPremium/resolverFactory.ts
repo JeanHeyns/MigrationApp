@@ -95,6 +95,18 @@ function buildDirectResolver(entry: ResolverEntry): FieldResolver {
     fieldType: entry.dvType,
     resolve: (poValue) => {
       if (poValue == null || poValue === '') return { status: 'empty' }
+      if (entry.dvType === 'Decimal' || entry.dvType === 'Money') {
+        const value = toNumber(poValue)
+        return value == null
+          ? { status: 'unresolved', originalLabel: String(poValue) }
+          : { status: 'resolved', value }
+      }
+      if (entry.dvType === 'Integer') {
+        const value = toNumber(poValue)
+        return value == null
+          ? { status: 'unresolved', originalLabel: String(poValue) }
+          : { status: 'resolved', value: Math.trunc(value) }
+      }
       return { status: 'resolved', value: poValue }
     },
   }
@@ -137,17 +149,9 @@ function buildNormalizedOptionMap(optionSet: GlobalOptionSetMeta): Map<string, n
 // ─── Choice resolver (Picklist) ───────────────────────────────────────────────
 
 async function buildChoiceResolver(entry: ResolverEntry, warnings: ResolverBuildWarning[]): Promise<FieldResolver> {
-  if (!entry.optionSetName) {
-    warnings.push({
-      severity: 'error',
-      field: entry.poFieldName,
-      type: 'incomplete_resolver_metadata',
-      message: `Picklist field "${entry.poFieldName}" has no optionSetName. Values cannot be resolved.`,
-    })
-    return unresolvedResolver('Picklist')
-  }
-
-  const optionSet = await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
+  const optionSet = entry.optionSetName
+    ? await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
+    : missingOptionSetResolverMetadata(entry, warnings)
   const map = optionSet ? buildNormalizedOptionMap(optionSet) : new Map<string, number>()
 
   return {
@@ -166,17 +170,9 @@ async function buildChoiceResolver(entry: ResolverEntry, warnings: ResolverBuild
 // ─── MultiChoice resolver (MultiSelectPicklist) ───────────────────────────────
 
 async function buildMultiChoiceResolver(entry: ResolverEntry, warnings: ResolverBuildWarning[]): Promise<FieldResolver> {
-  if (!entry.optionSetName) {
-    warnings.push({
-      severity: 'error',
-      field: entry.poFieldName,
-      type: 'incomplete_resolver_metadata',
-      message: `MultiSelectPicklist field "${entry.poFieldName}" has no optionSetName. Values cannot be resolved.`,
-    })
-    return unresolvedResolver('MultiSelectPicklist')
-  }
-
-  const optionSet = await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
+  const optionSet = entry.optionSetName
+    ? await fetchOptionSet(entry.optionSetName, entry.poFieldName, warnings)
+    : missingOptionSetResolverMetadata(entry, warnings)
   const map = optionSet ? buildNormalizedOptionMap(optionSet) : new Map<string, number>()
 
   return {
@@ -216,6 +212,19 @@ async function buildMultiChoiceResolver(entry: ResolverEntry, warnings: Resolver
 }
 
 // ─── Lookup resolver ──────────────────────────────────────────────────────────
+
+function missingOptionSetResolverMetadata(
+  entry: ResolverEntry,
+  warnings: ResolverBuildWarning[],
+): null {
+  warnings.push({
+    severity: 'error',
+    field: entry.poFieldName,
+    type: 'incomplete_resolver_metadata',
+    message: `Choice field "${entry.poFieldName}" is missing global option set metadata for Dataverse field "${entry.dvLogicalName}". All values will be unresolvable.`,
+  })
+  return null
+}
 
 const LARGE_TABLE_THRESHOLD = 5000
 
@@ -309,4 +318,23 @@ function unresolvedResolver(fieldType: ColumnMetaType): FieldResolver {
     fieldType,
     resolve: () => ({ status: 'unresolved', originalLabel: undefined }),
   }
+}
+
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  let text = String(value).trim().replace(/\s/g, '').replace(/[^\d.,-]/g, '')
+  if (!text) return undefined
+
+  const comma = text.lastIndexOf(',')
+  const dot = text.lastIndexOf('.')
+  if (comma >= 0 && dot >= 0) {
+    const decimalSeparator = comma > dot ? ',' : '.'
+    const thousandSeparator = decimalSeparator === ',' ? '.' : ','
+    text = text.replaceAll(thousandSeparator, '').replace(decimalSeparator, '.')
+  } else if (comma >= 0) {
+    text = text.replace(',', '.')
+  }
+
+  const parsed = Number(text)
+  return Number.isFinite(parsed) ? parsed : undefined
 }

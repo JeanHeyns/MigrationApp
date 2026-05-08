@@ -16,8 +16,9 @@ import {
 } from '@fluentui/react-components'
 import { ArrowUploadRegular, ArrowDownloadRegular } from '@fluentui/react-icons'
 import { useMigration } from '../../app/MigrationContext'
-import { fetchProjects } from '../../services/projectOnline/projects'
+import { fetchProjects, isMigratableProject } from '../../services/projectOnline/projects'
 import { fetchTasks } from '../../services/projectOnline/tasks'
+import { fetchDependencies } from '../../services/projectOnline/dependencies'
 import { fetchResources } from '../../services/projectOnline/resources'
 import { fetchAssignments, fetchTeamMembers } from '../../services/projectOnline/assignments'
 import { fetchCustomFields } from '../../services/projectOnline/customFields'
@@ -215,6 +216,7 @@ interface FetchItem {
 const INITIAL_ITEMS: FetchItem[] = [
   { key: 'projects',     label: 'Projects',      status: 'pending', count: 0 },
   { key: 'tasks',        label: 'Tasks',          status: 'pending', count: 0 },
+  { key: 'dependencies', label: 'Dependencies',   status: 'pending', count: 0 },
   { key: 'resources',    label: 'Resources',      status: 'pending', count: 0 },
   { key: 'assignments',  label: 'Assignments',    status: 'pending', count: 0 },
   { key: 'teamMembers',  label: 'Team Members',   status: 'pending', count: 0 },
@@ -321,7 +323,7 @@ export function Step1Connect() {
 
     const data: PoFetchedData = {
       pwaUrl: url,
-      projects: [], tasks: [], resources: [], assignments: [],
+      projects: [], tasks: [], dependencies: [], resources: [], assignments: [],
       teamMembers: [], customFields: [], lookupTables: [],
     }
 
@@ -329,6 +331,7 @@ export function Step1Connect() {
     const fullSteps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
       { key: 'tasks',        fn: () => fetchTasks(url) },
+      { key: 'dependencies', fn: () => fetchDependencies(url, data.projects) },
       { key: 'resources',    fn: () => fetchResources(url) },
       { key: 'assignments',  fn: () => fetchAssignments(url) },
       { key: 'teamMembers',  fn: () => fetchTeamMembers(url) },
@@ -355,8 +358,9 @@ export function Step1Connect() {
       }
     }
 
-    setResult(data)
-    setFetchedData(data)
+    const fetched = migrationMode === 'schemaOnly' ? data : pruneNonMigratableProjects(data)
+    setResult(fetched)
+    setFetchedData(fetched)
     setPhase(anyError ? 'error' : 'done')
   }
 
@@ -425,6 +429,7 @@ export function Step1Connect() {
     ? [
         { label: 'Projects',     count: activeResult.projects.length },
         { label: 'Tasks',        count: activeResult.tasks.length },
+        { label: 'Dependencies', count: activeResult.dependencies.length },
         { label: 'Resources',    count: activeResult.resources.length },
         { label: 'Assignments',  count: activeResult.assignments.length },
         { label: 'Team Members', count: activeResult.teamMembers.length },
@@ -688,4 +693,18 @@ export function Step1Connect() {
       )}
     </div>
   )
+}
+
+function pruneNonMigratableProjects(data: PoFetchedData): PoFetchedData {
+  const projects = data.projects.filter(isMigratableProject)
+  const projectIds = new Set(projects.map(project => project.ProjectId))
+
+  return {
+    ...data,
+    projects,
+    tasks: data.tasks.filter(task => projectIds.has(task.ProjectId)),
+    dependencies: data.dependencies.filter(dependency => projectIds.has(dependency.ProjectId)),
+    assignments: data.assignments.filter(assignment => projectIds.has(assignment.ProjectId)),
+    teamMembers: data.teamMembers.filter(teamMember => projectIds.has(teamMember.ProjectId)),
+  }
 }
