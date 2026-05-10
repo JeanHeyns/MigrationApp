@@ -1,4 +1,5 @@
 import type { ResolverPlan, ResolverEntry, ColumnMetaType, GlobalOptionSetMeta } from '../../models/dataOnly.types'
+import type { FieldMapping, OptionSetMapping } from '../../models/mapping.types'
 import { listAllRecords, fetchGlobalOptionSetFull } from '../dataverseService'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -61,6 +62,124 @@ function isDebug(): boolean {
 export function clearResolverCaches(): void {
   optionSetCache.clear()
   optionSetRequestCache.clear()
+}
+
+// ─── Full-mode passthrough resolver map ──────────────────────────────────────
+
+/**
+ * Builds a resolver map for `full` migration mode using direct type conversion.
+ * Enables applyResolvers() to be used in both full and dataOnly modes so the
+ * two paths cannot diverge.
+ */
+export function buildFullModeResolverMap(
+  fieldMappings: FieldMapping[],
+  optionSetMappings: OptionSetMapping[],
+): Map<string, FieldResolver> {
+  const resolvers = new Map<string, FieldResolver>()
+  for (const mapping of fieldMappings) {
+    if (mapping.skip || !mapping.migrateValue) continue
+    const fieldKey = mapping.customField.ODataFieldName
+    if (!fieldKey) continue
+    const resolver = buildFullModeFieldResolver(mapping, optionSetMappings)
+    if (resolver) resolvers.set(fieldKey, resolver)
+  }
+  return resolvers
+}
+
+function buildFullModeFieldResolver(
+  mapping: FieldMapping,
+  optionSetMappings: OptionSetMapping[],
+): FieldResolver | null {
+  switch (mapping.targetColumnType) {
+    case 'Boolean':
+      return {
+        fieldType: 'Boolean',
+        resolve: (v) => {
+          if (v == null || v === '') return { status: 'empty' }
+          return { status: 'resolved', value: v === true || v === 'true' || v === 'Yes' || v === 1 }
+        },
+      }
+    case 'Integer':
+      return {
+        fieldType: 'Integer',
+        resolve: (v) => {
+          if (v == null || v === '') return { status: 'empty' }
+          const n = Number.parseInt(String(v), 10)
+          return Number.isNaN(n)
+            ? { status: 'unresolved', originalLabel: String(v) }
+            : { status: 'resolved', value: n }
+        },
+      }
+    case 'Decimal':
+    case 'Currency':
+      return {
+        fieldType: mapping.targetColumnType === 'Currency' ? 'Money' : 'Decimal',
+        resolve: (v) => {
+          if (v == null || v === '') return { status: 'empty' }
+          const n = Number(v)
+          return Number.isNaN(n)
+            ? { status: 'unresolved', originalLabel: String(v) }
+            : { status: 'resolved', value: n }
+        },
+      }
+    case 'OptionSet': {
+      const osm = optionSetMappings.find(m => m.lookupTableUID === mapping.lookupTable?.LookupTableUID)
+      return {
+        fieldType: 'Picklist',
+        resolve: (v) => {
+          if (v == null || v === '') return { status: 'empty' }
+          const label = String(v)
+          const resolved = osm?.valueMap[label]
+          const fallback = resolved === undefined && mapping.manualDefault
+            ? osm?.valueMap[mapping.manualDefault]
+            : undefined
+          const value = resolved ?? fallback
+          return value !== undefined
+            ? { status: 'resolved', value }
+            : { status: 'unresolved', originalLabel: label }
+        },
+      }
+    }
+    case 'MultiSelectOptionSet': {
+      const osm = optionSetMappings.find(m => m.lookupTableUID === mapping.lookupTable?.LookupTableUID)
+      return {
+        fieldType: 'MultiSelectPicklist',
+        resolve: (v) => {
+          if (v == null || v === '') return { status: 'empty' }
+          const values = String(v)
+            .split(/[;,]/)
+            .map(s => s.trim())
+            .filter(Boolean)
+            .map(label => osm?.valueMap[label])
+            .filter((n): n is number => n !== undefined)
+          return values.length > 0
+            ? { status: 'resolved', value: values.join(',') }
+            : { status: 'empty' }
+        },
+      }
+    }
+    case 'Lookup': {
+      const col = mapping.relatedEntity?.logicalCollectionName
+      if (!col) return null
+      const targetName = mapping.targetLogicalName
+      return {
+        fieldType: 'Lookup',
+        resolve: (v) => {
+          if (v == null || v === '') return { status: 'empty' }
+          const guid = String(v).replace(/[{}]/g, '')
+          if (!guid) return { status: 'empty' }
+          return {
+            status: 'resolved',
+            bindKey: `${targetName}@odata.bind`,
+            bindValue: `/${col}(${guid})`,
+          }
+        },
+      }
+    }
+    default:
+      // Text, Memo, Date, DateTime — applyResolvers falls back to direct pass-through
+      return null
+  }
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────

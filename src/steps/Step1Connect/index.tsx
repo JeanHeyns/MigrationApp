@@ -201,6 +201,31 @@ const useStyles = makeStyles({
     fontSize: '13px',
     color: tokens.colorNeutralForeground2,
   },
+  modeOption: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    maxWidth: '220px',
+  },
+  modeDescription: {
+    fontSize: '12px',
+    color: tokens.colorNeutralForeground3,
+    lineHeight: '16px',
+  },
+  actionRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  actionHint: {
+    fontSize: '12px',
+    color: tokens.colorNeutralForeground3,
+  },
+  bannerAction: {
+    marginLeft: '8px',
+  },
 })
 
 type FetchItemStatus = 'pending' | 'fetching' | 'done' | 'error'
@@ -224,11 +249,16 @@ const INITIAL_ITEMS: FetchItem[] = [
   { key: 'lookupTables', label: 'Lookup Tables',  status: 'pending', count: 0 },
 ]
 
-const SCHEMA_ONLY_ITEMS: FetchItem[] = INITIAL_ITEMS.map(item =>
-  item.key === 'customFields' || item.key === 'lookupTables'
-    ? item
-    : { ...item, status: 'done', count: 0 }
-)
+const SCHEMA_ONLY_ITEMS: FetchItem[] = [
+  { key: 'customFields', label: 'Custom Fields', status: 'pending', count: 0 },
+  { key: 'lookupTables', label: 'Lookup Tables', status: 'pending', count: 0 },
+]
+
+type ModeNotice = {
+  intent: 'info' | 'warning'
+  text: string
+  action?: 'refetch' | 'scan'
+}
 
 const STATUS_ICON: Record<FetchItemStatus, string> = {
   pending:  '○',
@@ -250,6 +280,7 @@ export function Step1Connect() {
     pwaUrl, setPwaUrl, dataSource, setDataSource,
     selectedSolution, setSelectedSolution, setFetchedData, nextStep,
     migrationMode, setMigrationMode, schemaSnapshot, setSchemaSnapshot,
+    fetchedData, setResolverPlan,
   } = useMigration()
 
   // ── Project Online state ─────────────────────────────────────────────────
@@ -257,7 +288,8 @@ export function Step1Connect() {
   const [phase, setPhase]       = useState<'idle' | 'fetching' | 'done' | 'error'>('idle')
   const [items, setItems]       = useState<FetchItem[]>(INITIAL_ITEMS)
   const [globalError, setGlobalError] = useState<string | null>(null)
-  const [result, setResult]     = useState<PoFetchedData | null>(null)
+  const [result, setResult]     = useState<PoFetchedData | null>(fetchedData)
+  const [modeNotice, setModeNotice] = useState<ModeNotice | null>(null)
 
   // ── File upload state ────────────────────────────────────────────────────
   const fileInputRef            = useRef<HTMLInputElement>(null)
@@ -282,23 +314,17 @@ export function Step1Connect() {
       .finally(() => setSolutionsLoading(false))
   }, [])
 
-  // Auto-trigger scan when dataOnly mode is active and solution is chosen (or changed)
-  useEffect(() => {
-    if (migrationMode !== 'dataOnly' || !selectedSolution) return
-    if (schemaSnapshot?.solutionId === selectedSolution.solutionid) return
-    runScan()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [migrationMode, selectedSolution?.solutionid])
-
   async function runScan() {
     if (!selectedSolution) return
     setScanPhase('scanning')
     setScanError(null)
     setSchemaSnapshot(null)
+    setResolverPlan(null)
     try {
       const snapshot = await inspectSolution(selectedSolution.solutionid)
       setSchemaSnapshot(snapshot)
       setScanPhase('done')
+      setModeNotice(null)
     } catch (e) {
       setScanError(String(e))
       setScanPhase('error')
@@ -310,23 +336,8 @@ export function Step1Connect() {
     setItems(prev => prev.map(it => it.key === key ? { ...it, ...patch } : it))
   }
 
-  async function handleConnect() {
-    const url = localUrl.trim().replace(/\/$/, '')
-    if (!url.startsWith('https://')) {
-      setGlobalError('URL must start with https://')
-      return
-    }
-    setGlobalError(null)
-    setPhase('fetching')
-    setItems(migrationMode === 'schemaOnly' ? SCHEMA_ONLY_ITEMS : INITIAL_ITEMS)
-    setPwaUrl(url)
-
-    const data: PoFetchedData = {
-      pwaUrl: url,
-      projects: [], tasks: [], dependencies: [], resources: [], assignments: [],
-      teamMembers: [], customFields: [], lookupTables: [],
-    }
-
+  async function fetchProjectOnlineData(url: string): Promise<PoFetchedData> {
+    const data: PoFetchedData = emptyDataShape(url)
     type FetchStep = { key: keyof PoFetchedData; fn: () => Promise<unknown[]> }
     const fullSteps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
@@ -343,8 +354,8 @@ export function Step1Connect() {
       { key: 'lookupTables', fn: () => fetchLookupTables(url) },
     ]
     const steps = migrationMode === 'schemaOnly' ? schemaOnlySteps : fullSteps
-
     let anyError = false
+
     for (const step of steps) {
       updateItem(step.key, { status: 'fetching' })
       try {
@@ -358,10 +369,58 @@ export function Step1Connect() {
       }
     }
 
-    const fetched = migrationMode === 'schemaOnly' ? data : pruneNonMigratableProjects(data)
+    if (anyError) {
+      setPhase('error')
+    }
+
+    return migrationMode === 'schemaOnly' ? data : pruneNonMigratableProjects(data)
+  }
+
+  async function runFetch() {
+    if (!selectedSolution) {
+      setGlobalError('Select a Dataverse solution before fetching.')
+      return
+    }
+
+    if (dataSource === 'FileUpload') {
+      if (!uploadResult) {
+        setUploadError('Choose and parse a file before fetching.')
+        return
+      }
+      setGlobalError(null)
+      setScanError(null)
+      setModeNotice(null)
+      setFetchedData(uploadResult)
+      if (migrationMode === 'dataOnly') {
+        await runScan()
+      } else {
+        setSchemaSnapshot(null)
+        setResolverPlan(null)
+      }
+      return
+    }
+
+    const url = localUrl.trim().replace(/\/$/, '')
+    if (!url.startsWith('https://')) {
+      setGlobalError('URL must start with https://')
+      return
+    }
+    setGlobalError(null)
+    setScanError(null)
+    setModeNotice(null)
+    setSchemaSnapshot(null)
+    setResolverPlan(null)
+    setPhase('fetching')
+    setItems(migrationMode === 'schemaOnly' ? SCHEMA_ONLY_ITEMS : INITIAL_ITEMS)
+    setPwaUrl(url)
+
+    const fetched = await fetchProjectOnlineData(url)
     setResult(fetched)
     setFetchedData(fetched)
-    setPhase(anyError ? 'error' : 'done')
+    if (migrationMode === 'dataOnly') {
+      await runScan()
+    }
+    setPhase(prev => prev === 'error' ? 'error' : 'done')
   }
 
   // ── File upload handlers ─────────────────────────────────────────────────
@@ -371,11 +430,11 @@ export function Step1Connect() {
     setUploadedFile(file)
     setUploadError(null)
     setUploadResult(null)
+    setModeNotice(null)
     setUploadParsing(true)
     try {
       const data = await parseWorkbook(file)
       setUploadResult(data)
-      setFetchedData(data)
     } catch (err) {
       setUploadError(String(err))
     } finally {
@@ -396,6 +455,17 @@ export function Step1Connect() {
   function handleSolutionChange(id: string) {
     const sol = solutions.find(s => s.solutionid === id) ?? null
     setSelectedSolution(sol)
+    setSchemaSnapshot(null)
+    setResolverPlan(null)
+    setScanPhase('idle')
+    setScanError(null)
+    if (modeNotice?.action === 'scan') {
+      setModeNotice({
+        intent: 'warning',
+        text: 'Re-fetch needed: scan the newly selected target schema before continuing.',
+        action: 'scan',
+      })
+    }
   }
 
   function handleSourceChange(source: string) {
@@ -406,25 +476,87 @@ export function Step1Connect() {
     setUploadedFile(null)
     setUploadError(null)
     setGlobalError(null)
+    setModeNotice(null)
     setPhase('idle')
     setItems(INITIAL_ITEMS)
   }
 
-  // ── canProceed logic ─────────────────────────────────────────────────────
-  const poReady     = dataSource === 'ProjectOnline' && (phase === 'done' || phase === 'error') && !!result && (
-    migrationMode === 'schemaOnly'
-      ? result.customFields.length > 0 || result.lookupTables.length > 0
-      : result.projects.length > 0
-  )
-  const fileReady   = dataSource === 'FileUpload' && !!uploadResult && uploadResult.projects.length > 0
-  const scanOk      = migrationMode !== 'dataOnly' || scanPhase === 'done'
-  const canProceed  = (poReady || fileReady) && !!selectedSolution && scanOk
+  function getActiveResult(): PoFetchedData | null {
+    return dataSource === 'ProjectOnline' ? result : uploadResult
+  }
 
-  const isFetching  = phase === 'fetching'
+  function handleModeChange(mode: MigrationMode) {
+    const previousMode = migrationMode
+    if (mode === previousMode) return
+
+    const active = getActiveResult()
+    setMigrationMode(mode)
+    setSchemaSnapshot(null)
+    setResolverPlan(null)
+    setScanPhase('idle')
+    setScanError(null)
+
+    if (!active) {
+      setModeNotice(null)
+      return
+    }
+
+    if (previousMode === 'full' && mode === 'dataOnly') {
+      setModeNotice({
+        intent: 'warning',
+        text: 'Re-fetch needed: scan the target schema before continuing. Project Online data is still valid.',
+        action: 'scan',
+      })
+      return
+    }
+
+    if (previousMode === 'dataOnly' && mode === 'full') {
+      setModeNotice({ intent: 'info', text: 'Schema scan discarded. No re-fetch is needed.' })
+      return
+    }
+
+    if (mode === 'schemaOnly') {
+      setModeNotice({ intent: 'info', text: 'Switched to schema-only mode. Existing schema metadata is sufficient.' })
+      return
+    }
+
+    if (previousMode === 'schemaOnly') {
+      setModeNotice({
+        intent: 'warning',
+        text: 'Re-fetch needed: this mode requires full Project Online data.',
+        action: 'refetch',
+      })
+      return
+    }
+
+    setModeNotice(null)
+  }
+
+  // ── canProceed logic ─────────────────────────────────────────────────────
+  const activeResult = getActiveResult()
+  const isFetching  = phase === 'fetching' || scanPhase === 'scanning'
   const isDone      = phase === 'done' || phase === 'error'
+  const hasCompletedFetch = !!activeResult && fetchedData === activeResult
+  const sourceValid = dataSource === 'ProjectOnline'
+    ? localUrl.trim().replace(/\/$/, '').startsWith('https://')
+    : !!uploadResult && !uploadParsing
+  const fetchButtonEnabled = !!migrationMode && sourceValid && !!selectedSolution && !isFetching
+  const needsRefetch = !!activeResult
+    && migrationMode !== 'schemaOnly'
+    && activeResult.projects.length === 0
+    && (activeResult.customFields.length > 0 || activeResult.lookupTables.length > 0)
+  const canProceed = (() => {
+    if (!migrationMode || !selectedSolution || !activeResult || !hasCompletedFetch || needsRefetch) return false
+    if (migrationMode === 'schemaOnly') {
+      return activeResult.customFields.length > 0 || activeResult.lookupTables.length > 0
+    }
+    if (migrationMode === 'dataOnly') {
+      return activeResult.projects.length > 0 && !!schemaSnapshot
+    }
+    return activeResult.projects.length > 0
+  })()
 
   // Active preview data (either source)
-  const activeResult = dataSource === 'ProjectOnline' ? result : uploadResult
   const previewItems: { label: string; count: number }[] = activeResult
     ? [
         { label: 'Projects',     count: activeResult.projects.length },
@@ -437,28 +569,73 @@ export function Step1Connect() {
         { label: 'Lookup Tables',count: activeResult.lookupTables.length },
       ]
     : []
+  const fetchButtonLabel = migrationMode === 'schemaOnly'
+    ? 'Fetch schema metadata'
+    : migrationMode === 'dataOnly'
+      ? 'Fetch PWA data and scan target schema'
+      : 'Fetch PWA data'
+  const lookupEntryCount = activeResult?.lookupTables.reduce((sum, table) => sum + table.entries.length, 0) ?? 0
 
   return (
     <div className={styles.root}>
       <div>
-        <div className={styles.title}>Step 1 — Connect &amp; Read</div>
+        <div className={styles.title}>Step 1 — Configure &amp; Fetch</div>
         <div className={styles.subtitle}>
-          Connect to Project Online or upload an Excel/CSV file to begin the migration.
+          Choose the migration mode, source, and target before fetching the data needed for this run.
         </div>
       </div>
 
-      {/* ── Source selector ── */}
-      <TabList
-        selectedValue={dataSource}
-        onTabSelect={(_, d) => handleSourceChange(d.value as string)}
-      >
-        <Tab value="ProjectOnline">Project Online</Tab>
-        <Tab value="FileUpload">Upload File (Excel / CSV)</Tab>
-      </TabList>
+      {/* ── Migration mode ── */}
+      <div className={styles.sectionBox}>
+        <div className={styles.sectionTitle}>Migration mode</div>
+        <RadioGroup
+          value={migrationMode}
+          onChange={(_, d) => handleModeChange(d.value as MigrationMode)}
+          layout="horizontal"
+        >
+          <Radio
+            value="full"
+            label={
+              <span className={styles.modeOption}>
+                <span>Full migration</span>
+                <span className={styles.modeDescription}>Create columns and migrate data.</span>
+              </span>
+            }
+          />
+          <Radio
+            value="dataOnly"
+            label={
+              <span className={styles.modeOption}>
+                <span>Data only</span>
+                <span className={styles.modeDescription}>Reuse existing schema and migrate data.</span>
+              </span>
+            }
+          />
+          <Radio
+            value="schemaOnly"
+            label={
+              <span className={styles.modeOption}>
+                <span>Schema only</span>
+                <span className={styles.modeDescription}>Create schema without importing data.</span>
+              </span>
+            }
+          />
+        </RadioGroup>
+      </div>
 
-      {/* ── Project Online panel ── */}
-      {dataSource === 'ProjectOnline' && (
-        <>
+      {/* ── Source selector ── */}
+      <div className={styles.sectionBox}>
+        <div className={styles.sectionTitle}>Source</div>
+        <TabList
+          selectedValue={dataSource}
+          onTabSelect={(_, d) => handleSourceChange(d.value as string)}
+        >
+          <Tab value="ProjectOnline">Project Online</Tab>
+          <Tab value="FileUpload">Upload File (Excel / CSV)</Tab>
+        </TabList>
+
+        {/* ── Project Online panel ── */}
+        {dataSource === 'ProjectOnline' && (
           <div className={styles.urlRow}>
             <Field label="Project Online PWA URL" className={styles.urlInput}>
               <Input
@@ -469,95 +646,62 @@ export function Step1Connect() {
                 disabled={isFetching}
               />
             </Field>
-            <Button
-              appearance="primary"
-              onClick={handleConnect}
-              disabled={isFetching || !localUrl.trim()}
-              icon={isFetching ? <Spinner size="tiny" /> : undefined}
-            >
-              {isFetching ? 'Reading…' : 'Connect & Read'}
-            </Button>
           </div>
+        )}
 
-          {globalError && (
-            <MessageBar intent="error">
-              <MessageBarBody>{globalError}</MessageBarBody>
-            </MessageBar>
-          )}
-
-          {(isFetching || isDone) && (
-            <div className={styles.progressArea}>
-              <div className={styles.progressLabel}>
-                {isFetching ? 'Reading Project Online data…' : 'Read complete'}
-              </div>
-              {items.map(item => (
-                <div key={item.key} className={styles.progressItem}>
-                  <span style={{ color: STATUS_COLOR[item.status], fontWeight: '600', width: '16px' }}>
-                    {STATUS_ICON[item.status]}
-                  </span>
-                  <span style={{ width: '130px' }}>{item.label}</span>
-                  {item.status === 'done'     && <span style={{ color: '#107c10' }}>{item.count} records</span>}
-                  {item.status === 'fetching' && <Spinner size="extra-tiny" />}
-                  {item.status === 'error'    && <span style={{ color: '#a4262c', fontSize: '11px' }}>{item.error}</span>}
-                </div>
-              ))}
+        {/* ── File Upload panel ── */}
+        {dataSource === 'FileUpload' && (
+          <div className={styles.uploadBox}>
+            <div className={styles.templateRow}>
+              <ArrowDownloadRegular style={{ fontSize: '16px' }} />
+              <span>Download the migration template, fill it in, then upload it here.</span>
+              <Button
+                appearance="subtle"
+                size="small"
+                icon={<ArrowDownloadRegular />}
+                onClick={handleDownloadTemplate}
+              >
+                Download Template
+              </Button>
             </div>
-          )}
-        </>
-      )}
 
-      {/* ── File Upload panel ── */}
-      {dataSource === 'FileUpload' && (
-        <div className={styles.uploadBox}>
-          <div className={styles.templateRow}>
-            <ArrowDownloadRegular style={{ fontSize: '16px' }} />
-            <span>Download the migration template, fill it in, then upload it here.</span>
-            <Button
-              appearance="subtle"
-              size="small"
-              icon={<ArrowDownloadRegular />}
-              onClick={handleDownloadTemplate}
-            >
-              Download Template
-            </Button>
-          </div>
+            <div className={styles.uploadRow}>
+              <Button
+                appearance="secondary"
+                icon={<ArrowUploadRegular />}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploadParsing}
+              >
+                {uploadParsing ? 'Parsing…' : 'Choose File'}
+              </Button>
+              {uploadParsing && <Spinner size="tiny" />}
+              {uploadedFile && !uploadParsing && (
+                <span className={styles.fileName}>{uploadedFile.name}</span>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                style={{ display: 'none' }}
+                onChange={handleFileChange}
+              />
+            </div>
+            <div className={styles.uploadHint}>
+              Supported formats: .xlsx, .xls, .csv — use the template above for correct column structure.
+            </div>
 
-          <div className={styles.uploadRow}>
-            <Button
-              appearance="secondary"
-              icon={<ArrowUploadRegular />}
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploadParsing}
-            >
-              {uploadParsing ? 'Parsing…' : 'Choose File'}
-            </Button>
-            {uploadParsing && <Spinner size="tiny" />}
-            {uploadedFile && !uploadParsing && (
-              <span className={styles.fileName}>{uploadedFile.name}</span>
+            {uploadError && (
+              <MessageBar intent="error">
+                <MessageBarBody>Parse error: {uploadError}</MessageBarBody>
+              </MessageBar>
             )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              style={{ display: 'none' }}
-              onChange={handleFileChange}
-            />
           </div>
-          <div className={styles.uploadHint}>
-            Supported formats: .xlsx, .xls, .csv — use the template above for correct column structure.
-          </div>
+        )}
+      </div>
 
-          {uploadError && (
-            <MessageBar intent="error">
-              <MessageBarBody>Parse error: {uploadError}</MessageBarBody>
-            </MessageBar>
-          )}
-        </div>
-      )}
-
-      {/* ── Dataverse Solution (shared) ── */}
+      {/* ── Target ── */}
       <div className={styles.sectionBox}>
-        <div className={styles.sectionTitle}>Dataverse Solution</div>
+        <div className={styles.sectionTitle}>Target</div>
 
         {solutionsLoading && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: tokens.colorNeutralForeground3 }}>
@@ -599,32 +743,70 @@ export function Step1Connect() {
             No unmanaged solutions found in this Dataverse environment.
           </div>
         )}
+      </div>
 
-        {/* ── Migration mode toggle (shown once solution is selected) ── */}
-        {selectedSolution && (
-          <div className={styles.modeToggleRow}>
-            <div className={styles.modeLabel}>Migration mode</div>
-            <RadioGroup
-              value={migrationMode}
-              onChange={(_, d) => {
-                const mode = d.value as MigrationMode
-                setMigrationMode(mode)
-                if (mode !== 'dataOnly') {
-                  setSchemaSnapshot(null)
-                  setScanPhase('idle')
-                  setScanError(null)
-                }
-              }}
-              layout="horizontal"
-            >
-              <Radio value="full" label="Full migration — create columns + migrate data" />
-              <Radio value="dataOnly" label="Data only — use existing schema, migrate data" />
-              <Radio value="schemaOnly" label="Schema only — create schema, skip data" />
-            </RadioGroup>
+      {/* ── Fetch action ── */}
+      <div className={styles.sectionBox}>
+        <div className={styles.actionRow}>
+          <div>
+            <div className={styles.sectionTitle}>Fetch action</div>
+            <div className={styles.actionHint}>
+              Fetch is enabled once mode, source, and target are valid.
+            </div>
+          </div>
+          <Button
+            appearance="primary"
+            onClick={runFetch}
+            disabled={!fetchButtonEnabled}
+            icon={isFetching ? <Spinner size="tiny" /> : undefined}
+          >
+            {isFetching ? 'Fetching…' : fetchButtonLabel}
+          </Button>
+        </div>
+
+        {globalError && (
+          <MessageBar intent="error">
+            <MessageBarBody>{globalError}</MessageBarBody>
+          </MessageBar>
+        )}
+
+        {modeNotice && (
+          <MessageBar intent={modeNotice.intent}>
+            <MessageBarBody>
+              {modeNotice.text}
+              {modeNotice.action === 'refetch' && (
+                <Button appearance="subtle" size="small" onClick={runFetch} className={styles.bannerAction}>
+                  Re-fetch
+                </Button>
+              )}
+              {modeNotice.action === 'scan' && (
+                <Button appearance="subtle" size="small" onClick={runScan} className={styles.bannerAction}>
+                  Scan target schema
+                </Button>
+              )}
+            </MessageBarBody>
+          </MessageBar>
+        )}
+
+        {(isFetching || isDone) && dataSource === 'ProjectOnline' && (
+          <div className={styles.progressArea}>
+            <div className={styles.progressLabel}>
+              {isFetching ? 'Fetching Project Online data…' : 'Fetch complete'}
+            </div>
+            {items.map(item => (
+              <div key={item.key} className={styles.progressItem}>
+                <span style={{ color: STATUS_COLOR[item.status], fontWeight: '600', width: '16px' }}>
+                  {STATUS_ICON[item.status]}
+                </span>
+                <span style={{ width: '130px' }}>{item.label}</span>
+                {item.status === 'done'     && <span style={{ color: '#107c10' }}>{item.count} records</span>}
+                {item.status === 'fetching' && <Spinner size="extra-tiny" />}
+                {item.status === 'error'    && <span style={{ color: '#a4262c', fontSize: '11px' }}>{item.error}</span>}
+              </div>
+            ))}
           </div>
         )}
 
-        {/* ── Schema scan feedback (dataOnly mode) ── */}
         {migrationMode === 'dataOnly' && selectedSolution && (
           <>
             {scanPhase === 'scanning' && (
@@ -657,7 +839,7 @@ export function Step1Connect() {
               <MessageBar intent="error">
                 <MessageBarBody>
                   Schema scan failed: {scanError}
-                  <Button appearance="subtle" size="small" onClick={runScan} style={{ marginLeft: '8px' }}>
+                  <Button appearance="subtle" size="small" onClick={runScan} className={styles.bannerAction}>
                     Retry
                   </Button>
                 </MessageBarBody>
@@ -665,11 +847,25 @@ export function Step1Connect() {
             )}
           </>
         )}
+
+        {activeResult && migrationMode === 'schemaOnly' && activeResult.customFields.length === 0 && activeResult.lookupTables.length === 0 && (
+          <MessageBar intent="warning">
+            <MessageBarBody>No custom fields or lookup tables were found. Add schema metadata or choose another mode before continuing.</MessageBarBody>
+          </MessageBar>
+        )}
       </div>
 
       {/* ── Preview cards (shared) ── */}
       {previewItems.length > 0 && (
         <>
+          {migrationMode === 'schemaOnly' && activeResult && hasCompletedFetch && (
+            <MessageBar intent="success">
+              <MessageBarBody>
+                Fetched {activeResult.customFields.length} custom field{activeResult.customFields.length !== 1 ? 's' : ''}, {activeResult.lookupTables.length} lookup table{activeResult.lookupTables.length !== 1 ? 's' : ''} ({lookupEntryCount} entr{lookupEntryCount !== 1 ? 'ies' : 'y'}).
+              </MessageBarBody>
+            </MessageBar>
+          )}
+
           <div className={styles.previewGrid}>
             {previewItems.filter(i => i.count > 0).map(item => (
               <div key={item.label} className={styles.previewCard}>
@@ -706,5 +902,19 @@ function pruneNonMigratableProjects(data: PoFetchedData): PoFetchedData {
     dependencies: data.dependencies.filter(dependency => projectIds.has(dependency.ProjectId)),
     assignments: data.assignments.filter(assignment => projectIds.has(assignment.ProjectId)),
     teamMembers: data.teamMembers.filter(teamMember => projectIds.has(teamMember.ProjectId)),
+  }
+}
+
+function emptyDataShape(pwaUrl: string): PoFetchedData {
+  return {
+    pwaUrl,
+    projects: [],
+    tasks: [],
+    dependencies: [],
+    resources: [],
+    assignments: [],
+    teamMembers: [],
+    customFields: [],
+    lookupTables: [],
   }
 }

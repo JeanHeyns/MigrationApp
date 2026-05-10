@@ -4,10 +4,8 @@
  * Dataverse omgeving aangesproken moet worden.
  */
 import { client } from '../client'
-import { DATAVERSE_ORG_URL } from '../config/environment'
+import { getDataverseOrgUrl } from '../config/environment'
 import type { GlobalOptionSetMeta } from '../models/dataOnly.types'
-
-const ORG_URL = DATAVERSE_ORG_URL
 
 type ListResult = { value?: unknown[]; '@odata.nextLink'?: string; 'odata.nextLink'?: string }
 
@@ -42,7 +40,7 @@ export async function listRecords(
   while (rows.length < top) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     entityName,
     prefer: 'odata.include-annotations=*',
     accept: 'application/json',
@@ -98,7 +96,7 @@ export async function listAllRecords(
       : pageSize
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const params: Record<string, any> = {
-      organization: ORG_URL,
+      organization: getDataverseOrgUrl(),
       entityName: entitySetName,
       prefer: 'odata.include-annotations=*',
       accept: 'application/json',
@@ -133,7 +131,7 @@ export async function createRecord(
 ): Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     entityName,
     prefer: 'return=representation',
     accept: 'application/json',
@@ -159,7 +157,7 @@ export async function updateRecord(
 ): Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     prefer: 'return=representation',
     accept: 'application/json',
     entityName,
@@ -184,7 +182,7 @@ export async function performUnboundAction(
   item?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const params = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     actionName,
     item,
   }
@@ -207,7 +205,7 @@ export async function createGlobalOptionSet(
 ): Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     prefer: 'return=representation',
     accept: 'application/json',
     item,
@@ -233,7 +231,7 @@ export async function createEntityAttribute(
 ): Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     prefer: 'return=representation',
     accept: 'application/json',
     entityLogicalName,
@@ -259,7 +257,7 @@ export async function createEntityDefinition(
 ): Promise<Record<string, unknown>> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     prefer: 'return=representation',
     accept: 'application/json',
     item,
@@ -287,7 +285,7 @@ export async function fetchEntityDefinition(entityLogicalName: string): Promise<
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const params: Record<string, any> = {
-      organization: ORG_URL,
+      organization: getDataverseOrgUrl(),
       accept: 'application/json',
       entityLogicalName,
       '$select': 'LogicalName,EntitySetName,PrimaryNameAttribute,MetadataId',
@@ -319,7 +317,7 @@ export async function getGlobalOptionSetMetadataId(name: string): Promise<string
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const params: Record<string, any> = {
-      organization: ORG_URL,
+      organization: getDataverseOrgUrl(),
       accept: 'application/json',
       '$select': 'MetadataId,Name',
       optionSetName: name,
@@ -350,7 +348,7 @@ export interface DvEntityDefinition {
 export async function fetchEntityDefinitions(): Promise<DvEntityDefinition[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     '$select': 'LogicalName,LogicalCollectionName,DisplayName,IsCustomEntity,MetadataId',
   }
@@ -407,7 +405,7 @@ export interface DvGlobalOptionSetDefinition {
 export async function fetchGlobalOptionSetDefinitions(): Promise<DvGlobalOptionSetDefinition[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     '$select': 'Name,DisplayName,MetadataId',
   }
@@ -444,7 +442,7 @@ const EXCLUDED_ATTR_TYPES = new Set(['Virtual', 'EntityName', 'Uniqueidentifier'
 export async function fetchEntityAttributes(entityLogicalName: string): Promise<DvEntityAttribute[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     entityLogicalName,
     '$select': 'LogicalName',
@@ -490,7 +488,7 @@ export interface EntityWithCustomAttributes {
 export async function fetchEntityWithCustomAttributes(entityLogicalName: string): Promise<EntityWithCustomAttributes> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     entityLogicalName,
     '$select': 'LogicalName,EntitySetName,PrimaryNameAttribute',
@@ -526,7 +524,7 @@ interface RawAttributeMeta {
 export async function fetchCustomEntityAttributes(entityLogicalName: string): Promise<RawAttributeMeta[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     entityLogicalName,
     '$filter': 'IsCustomAttribute eq true',
@@ -595,7 +593,7 @@ async function fetchAttributesByCast(
 ): Promise<RawPicklistAttributeMeta[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const baseParams: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     entityLogicalName,
     attributeCast,
@@ -787,10 +785,10 @@ export async function debugFetchAttributeOptionSetMetadata(
         ? 'Explicit MultiSelectPicklist attribute cast'
         : 'Explicit Picklist attribute cast',
       operationName,
-      `${ORG_URL}/api/data/v9.2/EntityDefinitions(LogicalName='${entityLogicalName}')` +
+      `${getDataverseOrgUrl()}/api/data/v9.2/EntityDefinitions(LogicalName='${entityLogicalName}')` +
       `/Attributes(LogicalName='${attributeLogicalName}')/${attributeCast}?$expand=OptionSet,GlobalOptionSet`,
       {
-        organization: ORG_URL,
+        organization: getDataverseOrgUrl(),
         accept: 'application/json',
         entityLogicalName,
         attributeLogicalName,
@@ -801,13 +799,13 @@ export async function debugFetchAttributeOptionSetMetadata(
     if (selected) return { selected, attempts }
   }
 
-  const connectorEnumUrl = `Connector enum metadata: ${ORG_URL}/${entityLogicalName}/${attributeMetadataId}/${type}`
+  const connectorEnumUrl = `Connector enum metadata: ${getDataverseOrgUrl()}/${entityLogicalName}/${attributeMetadataId}/${type}`
   const selectedByConnectorEnum = await run(
     'Connector enum metadata with organization',
     'GetOptionSetMetadataWithOrganization',
     connectorEnumUrl,
     {
-      organization: ORG_URL,
+      organization: getDataverseOrgUrl(),
       body: {
         entityName: entityLogicalName,
         attributeMetadataId,
@@ -820,14 +818,14 @@ export async function debugFetchAttributeOptionSetMetadata(
 
   if (attributeLogicalName) {
     const intendedUrl =
-      `${ORG_URL}/api/data/v9.2/EntityDefinitions(LogicalName='${entityLogicalName}')` +
+      `${getDataverseOrgUrl()}/api/data/v9.2/EntityDefinitions(LogicalName='${entityLogicalName}')` +
       `/Attributes(LogicalName='${attributeLogicalName}')/${attributeCast}?$expand=OptionSet,GlobalOptionSet`
     const selected = await run(
       'Attribute cast by logical name',
       'GetEntityAttributeByLogicalNameCast',
       intendedUrl,
       {
-        organization: ORG_URL,
+        organization: getDataverseOrgUrl(),
         accept: 'application/json',
         entityLogicalName,
         attributeLogicalName,
@@ -840,14 +838,14 @@ export async function debugFetchAttributeOptionSetMetadata(
   }
 
   const byMetadataIdUrl =
-    `${ORG_URL}/api/data/v9.1.0/EntityDefinitions(LogicalName='${entityLogicalName}')` +
+    `${getDataverseOrgUrl()}/api/data/v9.1.0/EntityDefinitions(LogicalName='${entityLogicalName}')` +
     `/Attributes(${attributeMetadataId})/${attributeCast}?$expand=OptionSet,GlobalOptionSet`
   const selectedByMetadataId = await run(
     'Attribute cast by MetadataId',
     'GetEntityAttributeByMetadataIdCast',
     byMetadataIdUrl,
     {
-      organization: ORG_URL,
+      organization: getDataverseOrgUrl(),
       accept: 'application/json',
       entityLogicalName,
       attributeMetadataId,
@@ -861,6 +859,77 @@ export async function debugFetchAttributeOptionSetMetadata(
   return { selected: null, attempts }
 }
 
+export async function createOneToManyRelationship(params: {
+  referencedEntity: string
+  referencingEntity: string
+  lookupSchemaName: string
+  lookupDisplayName: string
+  relationshipSchemaName: string
+  solutionUniqueName: string
+}): Promise<{ lookupLogicalName: string; navigationProperty: string }> {
+  const { referencedEntity, referencingEntity, lookupSchemaName, lookupDisplayName, relationshipSchemaName, solutionUniqueName } = params
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const reqParams: Record<string, any> = {
+    organization: getDataverseOrgUrl(),
+    prefer: 'return=representation',
+    accept: 'application/json',
+    'MSCRM.SolutionUniqueName': solutionUniqueName,
+    item: {
+      OneToManyRelationship: {
+        '@odata.type': 'Microsoft.Dynamics.CRM.OneToManyRelationshipMetadata',
+        SchemaName: relationshipSchemaName,
+        ReferencedEntity: referencedEntity,
+        ReferencingEntity: referencingEntity,
+        AssociatedMenuConfiguration: {
+          Behavior: 'UseCollectionName',
+          Group: 'Details',
+          Order: 10000,
+        },
+        CascadeConfiguration: {
+          Assign: 'NoCascade',
+          Delete: 'RemoveLink',
+          Merge: 'NoCascade',
+          Reparent: 'NoCascade',
+          Share: 'NoCascade',
+          Unshare: 'NoCascade',
+        },
+      },
+      Lookup: {
+        '@odata.type': 'Microsoft.Dynamics.CRM.LookupAttributeMetadata',
+        SchemaName: lookupSchemaName,
+        DisplayName: {
+          LocalizedLabels: [{ Label: lookupDisplayName, LanguageCode: 1033 }],
+        },
+        RequiredLevel: { Value: 'None' },
+      },
+    },
+  }
+
+  const res = await client.executeAsync<typeof reqParams, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'CreateOneToManyRelationship',
+      parameters: reqParams,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+
+  const lookupLogicalName = lookupSchemaName.toLowerCase()
+
+  // Resolve navigation property name from relationship metadata
+  try {
+    const rels = await fetchEntityManyToOneRelationships(referencingEntity)
+    const rel = rels.find(r => r.ReferencingAttribute === lookupLogicalName && r.ReferencedEntity === referencedEntity)
+    return {
+      lookupLogicalName,
+      navigationProperty: rel?.ReferencingEntityNavigationPropertyName ?? `${lookupLogicalName}_${referencedEntity}`,
+    }
+  } catch {
+    return { lookupLogicalName, navigationProperty: `${lookupLogicalName}_${referencedEntity}` }
+  }
+}
+
 interface RawRelationshipMeta {
   ReferencingAttribute: string
   ReferencingEntityNavigationPropertyName: string
@@ -870,7 +939,7 @@ interface RawRelationshipMeta {
 export async function fetchEntityManyToOneRelationships(entityLogicalName: string): Promise<RawRelationshipMeta[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: Record<string, any> = {
-    organization: ORG_URL,
+    organization: getDataverseOrgUrl(),
     accept: 'application/json',
     entityLogicalName,
     '$select': 'ReferencingAttribute,ReferencingEntityNavigationPropertyName,ReferencedEntity',
@@ -893,7 +962,7 @@ export async function fetchGlobalOptionSetFull(name: string): Promise<GlobalOpti
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const params: Record<string, any> = {
-      organization: ORG_URL,
+      organization: getDataverseOrgUrl(),
       accept: 'application/json',
       optionSetName: name,
     }

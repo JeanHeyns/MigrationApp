@@ -1,6 +1,6 @@
 import type { FieldMapping, OptionSetMapping } from '../../models/mapping.types'
 import type { DataverseColumnType } from '../../models/mapping.types'
-import { createEntityAttribute } from '../dataverseService'
+import { createEntityAttribute, createOneToManyRelationship } from '../dataverseService'
 
 export interface ColumnCreateResult {
   fieldMapping: FieldMapping
@@ -128,27 +128,22 @@ function buildAttributeBody(
       }
     }
 
-    case 'Lookup': {
-      if (!fm.relatedEntity?.logicalName) throw new Error(`Lookup column "${fm.targetLogicalName}" requires a related entity`)
-      return {
-        ...base,
-        '@odata.type': 'Microsoft.Dynamics.CRM.LookupAttributeMetadata',
-        Targets: [fm.relatedEntity.logicalName],
-      }
-    }
-
     default:
       throw new Error(`Unsupported column type: ${type}`)
   }
 }
 
 function isAlreadyExistsError(msg: string): boolean {
+  const lower = msg.toLowerCase()
   return (
     msg.includes('0x80044331') ||
     msg.includes('0x80060891') ||
-    msg.toLowerCase().includes('already exists') ||
-    msg.toLowerCase().includes('attribute with the specified name') ||
-    msg.toLowerCase().includes('duplicate')
+    msg.includes('0x8004F049') ||
+    msg.includes('0x80048408') ||
+    lower.includes('already exists') ||
+    lower.includes('attribute with the specified name') ||
+    lower.includes('duplicate') ||
+    lower.includes('schemaname is already in use')
   )
 }
 
@@ -230,6 +225,61 @@ export async function createColumns(
       }
       results.push(result)
       onProgress(result)
+      continue
+    }
+
+    if (fm.targetColumnType === 'Lookup') {
+      if (!fm.relatedEntity?.logicalName) {
+        const result: ColumnCreateResult = {
+          fieldMapping: fm,
+          logicalName: fm.targetLogicalName,
+          entityLogicalName,
+          success: false,
+          error: `Cannot create lookup column "${fm.targetLogicalName}": target entity is missing. Create the lookup table first.`,
+        }
+        results.push(result)
+        onProgress(result)
+        continue
+      }
+
+      try {
+        const prefix = fm.targetLogicalName.split('_')[0]
+        const lookupFieldPart = fm.targetLogicalName.split('_').slice(1).join('').slice(0, 20)
+        const referencedShort = fm.relatedEntity.logicalName.replace(/_/g, '').slice(0, 20)
+        const referencingShort = entityLogicalName.replace(/_/g, '').slice(0, 15)
+        const relationshipSchemaName = `${prefix}_${referencedShort}_${referencingShort}_${lookupFieldPart}`
+
+        await createOneToManyRelationship({
+          referencedEntity: fm.relatedEntity.logicalName,
+          referencingEntity: entityLogicalName,
+          lookupSchemaName: fm.targetLogicalName,
+          lookupDisplayName: fm.customField.CustomFieldName,
+          relationshipSchemaName,
+          solutionUniqueName,
+        })
+
+        const result: ColumnCreateResult = {
+          fieldMapping: fm,
+          logicalName: fm.targetLogicalName,
+          entityLogicalName,
+          success: true,
+        }
+        results.push(result)
+        onProgress(result)
+      } catch (e) {
+        const msg = String(e)
+        const alreadyExisted = isAlreadyExistsError(msg)
+        const result: ColumnCreateResult = {
+          fieldMapping: fm,
+          logicalName: fm.targetLogicalName,
+          entityLogicalName,
+          success: alreadyExisted,
+          alreadyExisted,
+          error: alreadyExisted ? undefined : msg,
+        }
+        results.push(result)
+        onProgress(result)
+      }
       continue
     }
 

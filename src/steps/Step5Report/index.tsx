@@ -150,9 +150,9 @@ function buildSkippedGroups(instances: SkippedFieldInstance[]): SkippedGroup[] {
 export function Step5Report() {
   const styles = useStyles()
   const {
-    importResults, prevStep, setCurrentStep, clearImportResults, clearLogs,
+    importResults, prevStep,
     migrationMode, skippedFieldInstances, selectedSolution,
-    clearSkippedFieldInstances, schemaCreationResults, setSchemaCreationResults,
+    schemaCreationResults, resetState,
   } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
@@ -203,11 +203,9 @@ export function Step5Report() {
   }
 
   function handleStartNew() {
-    clearImportResults()
-    clearLogs()
-    clearSkippedFieldInstances()
-    setSchemaCreationResults(null)
-    setCurrentStep(1)
+    if (window.confirm('Start a new migration? Current results will be cleared.')) {
+      resetState()
+    }
   }
 
   const showImportReport = migrationMode !== 'schemaOnly'

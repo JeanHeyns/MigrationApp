@@ -4,9 +4,10 @@ import type { ImportError } from '../../models/plannerPremium.types'
 import type { FieldResolver } from './resolverFactory'
 import type { SkippedField } from './recordResolverApplier'
 import { listRecords, performUnboundAction, patchRecord } from './dataverseClient'
-import { cleanGuid, customFieldPayload, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
+import { cleanGuid, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
 import { projectOnlineIdColumnName } from './columnManager'
 import { applyResolvers } from './recordResolverApplier'
+import { buildFullModeResolverMap } from './resolverFactory'
 
 // Toggle in DevTools: localStorage.setItem('DEBUG_DATAONLY_WRITER', '1')
 const isDebug = (): boolean => {
@@ -26,8 +27,9 @@ export interface ProjectWriteResult {
  * Creates msdyn_project records using the Project schedule API.
  * Existing projects with the same subject are skipped and mapped.
  *
- * In dataOnly mode: pass `resolvers` (from buildResolverMap). Presence of resolvers
- * activates the resolver pipeline for custom fields. `optionSetMappings` is ignored in that case.
+ * Both modes use applyResolvers() for the custom-field patch:
+ * - full mode: resolvers are built from optionSetMappings (passthrough per field type)
+ * - dataOnly mode: pass the pre-built resolver map from buildResolverMap()
  */
 export async function writeProjects(
   projects: PoProject[],
@@ -49,6 +51,10 @@ export async function writeProjects(
     console.groupEnd()
   }
 
+  const effectiveResolvers = dataOnly
+    ? resolvers!
+    : buildFullModeResolverMap(mappingConfig.fieldMappings, optionSetMappings)
+
   let isFirstProject = true
 
   for (const project of projects) {
@@ -58,9 +64,7 @@ export async function writeProjects(
 
       if (existingId) {
         const { error, skippedFields } = await applyProjectPatch(
-          existingId, project, mappingConfig, optionSetMappings,
-          dataOnly ? resolvers : undefined,
-          dataOnly && isFirstProject,
+          existingId, project, mappingConfig, effectiveResolvers, isFirstProject,
         )
         isFirstProject = false
         const result: ProjectWriteResult = {
@@ -94,9 +98,7 @@ export async function writeProjects(
 
       if (dvProjectId) {
         const patchResult = await applyProjectPatch(
-          dvProjectId, project, mappingConfig, optionSetMappings,
-          dataOnly ? resolvers : undefined,
-          dataOnly && isFirstProject,
+          dvProjectId, project, mappingConfig, effectiveResolvers, isFirstProject,
         )
         patchError = patchResult.error
         skippedFields = patchResult.skippedFields
@@ -139,8 +141,7 @@ async function applyProjectPatch(
   dvProjectId: string,
   project: PoProject,
   mappingConfig: MappingConfiguration,
-  optionSetMappings: OptionSetMapping[],
-  resolvers: Map<string, FieldResolver> | undefined,
+  resolvers: Map<string, FieldResolver>,
   logPayload: boolean,
 ): Promise<PatchResult> {
   const ownerResourceId = project.ProjectOwnerResourceId ?? project.ProjectOwnerResourceUid
@@ -154,32 +155,25 @@ async function applyProjectPatch(
     ? { 'msdyn_projectmanager@odata.bind': `/systemusers(${ownerMapping.dataverseSystemUserId})` }
     : {}
 
-  let customPayload: Record<string, unknown>
-  let skippedFields: SkippedField[] | undefined
+  const projectFieldMappings = mappingConfig.fieldMappings.filter(
+    m => m.customField.CustomFieldEntityType === 'Project',
+  )
+  const applied = applyResolvers(project as Record<string, unknown>, projectFieldMappings, resolvers)
+  const customPayload = applied.payload
+  const skippedFields = applied.skippedFields.length > 0 ? applied.skippedFields : undefined
 
-  if (resolvers) {
-    const projectFieldMappings = mappingConfig.fieldMappings.filter(
-      m => m.customField.CustomFieldEntityType === 'Project',
-    )
-    const applied = applyResolvers(project as Record<string, unknown>, projectFieldMappings, resolvers)
-    customPayload = applied.payload
-    skippedFields = applied.skippedFields.length > 0 ? applied.skippedFields : undefined
-
-    if (isDebug()) {
-      if (logPayload) {
-        console.group(`[dataOnly] First project payload — "${project.ProjectName}"`)
-        console.log('Custom field payload:', JSON.stringify(customPayload, null, 2))
-        console.log('Owner bind:', ownerBind)
-        if (skippedFields?.length) {
-          console.warn(`Skipped fields (${skippedFields.length}):`, skippedFields.map(s => s.poField))
-        }
-        console.groupEnd()
-      } else if (skippedFields?.length) {
-        console.warn(`[dataOnly] "${project.ProjectName}" — ${skippedFields.length} skipped field(s)`)
+  if (isDebug()) {
+    if (logPayload) {
+      console.group(`[projectWriter] First project payload — "${project.ProjectName}"`)
+      console.log('Custom field payload:', JSON.stringify(customPayload, null, 2))
+      console.log('Owner bind:', ownerBind)
+      if (skippedFields?.length) {
+        console.warn(`Skipped fields (${skippedFields.length}):`, skippedFields.map(s => s.poField))
       }
+      console.groupEnd()
+    } else if (skippedFields?.length) {
+      console.warn(`[projectWriter] "${project.ProjectName}" — ${skippedFields.length} skipped field(s)`)
     }
-  } else {
-    customPayload = customFieldPayload(project, 'Project', mappingConfig, optionSetMappings)
   }
 
   const patch: Record<string, unknown> = { ...customPayload, ...ownerBind }
@@ -190,15 +184,10 @@ async function applyProjectPatch(
     await patchRecord('msdyn_projects', dvProjectId, patch)
     return { skippedFields }
   } catch (e) {
-    if (resolvers) {
-      // dataOnly: surface patch failure — project exists but custom fields not written
-      return {
-        error: nowError('Project', dvProjectId, `Custom field patch failed: ${String(e)}`),
-        skippedFields,
-      }
+    return {
+      error: nowError('Project', dvProjectId, `Custom field patch failed: ${String(e)}`),
+      skippedFields,
     }
-    // full mode: swallow as before
-    return { skippedFields }
   }
 }
 
