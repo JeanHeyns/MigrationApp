@@ -5,6 +5,7 @@ import {
   MessageBar,
   MessageBarBody,
   ProgressBar,
+  Select,
   Spinner,
   makeStyles,
   tokens,
@@ -12,6 +13,8 @@ import {
 import { useMigration } from '../../app/MigrationContext'
 import { writeResources } from '../../services/plannerPremium/resourceWriter'
 import { writeProjects } from '../../services/plannerPremium/projectWriter'
+import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
+import type { DvSystemUser } from '../../models/plannerPremium.types'
 import { writeTasks } from '../../services/plannerPremium/taskWriter'
 import { writeDependencies } from '../../services/plannerPremium/dependencyWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
@@ -70,6 +73,8 @@ export function Step4Import() {
   const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(
     () => new Set(fetchedData?.projects.map(p => p.ProjectId) ?? []),
   )
+  const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
+  const [projectOwnerMap, setProjectOwnerMap] = useState<Record<string, string>>({})
   const [phase, setPhase] = useState<Phase>('Ready')
   const [running, setRunning] = useState(false)
   const [logLines, setLogLines] = useState<string[]>([])
@@ -83,6 +88,10 @@ export function Step4Import() {
   useEffect(() => {
     if (migrationMode === 'schemaOnly') setCurrentStep(5)
   }, [migrationMode, setCurrentStep])
+
+  useEffect(() => {
+    fetchSystemUsers().then(setSystemUsers).catch(() => {})
+  }, [])
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
@@ -215,7 +224,7 @@ export function Step4Import() {
       const projectResults = await writeProjects(selectedProjects, config, optionSetMappings, r => {
         setCompleted(c => c + 1)
         appendLog(`${r.success ? 'OK' : 'ERR'} project ${r.poProjectId}${r.error ? `: ${r.error.message}` : ''}${r.skippedFields?.length ? ` (${r.skippedFields.length} field(s) skipped)` : ''}`)
-      }, resolvers)
+      }, resolvers, projectOwnerMap)
       addImportResult(makeResult('Projects', projectResults.length, projectResults.flatMap(r => r.error ? [r.error] : [])))
       const projectIdMap = Object.fromEntries(projectResults.filter(r => r.success && r.dvProjectId).map(r => [r.poProjectId, r.dvProjectId as string]))
 
@@ -339,6 +348,7 @@ export function Step4Import() {
               <th className={styles.th}>Project</th>
               <th className={styles.th}>Start</th>
               <th className={styles.th}>Finish</th>
+              <th className={styles.th}>Owner / Project Manager</th>
             </tr>
           </thead>
           <tbody>
@@ -354,6 +364,19 @@ export function Step4Import() {
                 <td className={styles.td}>{project.ProjectName}</td>
                 <td className={styles.td}>{project.ProjectStartDate ?? '-'}</td>
                 <td className={styles.td}>{project.ProjectFinishDate ?? '-'}</td>
+                <td className={styles.td}>
+                  <Select
+                    size="small"
+                    disabled={running}
+                    value={projectOwnerMap[project.ProjectId] ?? ''}
+                    onChange={(_, d) => setProjectOwnerMap(prev => ({ ...prev, [project.ProjectId]: d.value }))}
+                  >
+                    <option value="">— no override —</option>
+                    {systemUsers.map(u => (
+                      <option key={u.systemuserid} value={u.systemuserid}>{u.fullname}</option>
+                    ))}
+                  </Select>
+                </td>
               </tr>
             ))}
           </tbody>

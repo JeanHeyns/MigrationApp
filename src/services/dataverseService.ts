@@ -868,6 +868,20 @@ export async function createOneToManyRelationship(params: {
   solutionUniqueName: string
 }): Promise<{ lookupLogicalName: string; navigationProperty: string }> {
   const { referencedEntity, referencingEntity, lookupSchemaName, lookupDisplayName, relationshipSchemaName, solutionUniqueName } = params
+  const label = (text: string) => ({
+    '@odata.type': 'Microsoft.Dynamics.CRM.Label',
+    LocalizedLabels: [{
+      '@odata.type': 'Microsoft.Dynamics.CRM.LocalizedLabel',
+      Label: text,
+      LanguageCode: 1033,
+    }],
+    UserLocalizedLabel: {
+      '@odata.type': 'Microsoft.Dynamics.CRM.LocalizedLabel',
+      Label: text,
+      LanguageCode: 1033,
+    },
+  })
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const reqParams: Record<string, any> = {
     organization: getDataverseOrgUrl(),
@@ -875,32 +889,33 @@ export async function createOneToManyRelationship(params: {
     accept: 'application/json',
     'MSCRM.SolutionUniqueName': solutionUniqueName,
     item: {
-      OneToManyRelationship: {
-        '@odata.type': 'Microsoft.Dynamics.CRM.OneToManyRelationshipMetadata',
-        SchemaName: relationshipSchemaName,
-        ReferencedEntity: referencedEntity,
-        ReferencingEntity: referencingEntity,
-        AssociatedMenuConfiguration: {
-          Behavior: 'UseCollectionName',
-          Group: 'Details',
-          Order: 10000,
-        },
-        CascadeConfiguration: {
-          Assign: 'NoCascade',
-          Delete: 'RemoveLink',
-          Merge: 'NoCascade',
-          Reparent: 'NoCascade',
-          Share: 'NoCascade',
-          Unshare: 'NoCascade',
-        },
+      '@odata.type': 'Microsoft.Dynamics.CRM.OneToManyRelationshipMetadata',
+      SchemaName: relationshipSchemaName,
+      ReferencedEntity: referencedEntity,
+      ReferencedAttribute: `${referencedEntity}id`,
+      ReferencingEntity: referencingEntity,
+      AssociatedMenuConfiguration: {
+        Behavior: 'UseCollectionName',
+        Group: 'Details',
+        Label: label(lookupDisplayName),
+        Order: 10000,
+      },
+      CascadeConfiguration: {
+        Assign: 'NoCascade',
+        Delete: 'RemoveLink',
+        Merge: 'NoCascade',
+        Reparent: 'NoCascade',
+        Share: 'NoCascade',
+        Unshare: 'NoCascade',
       },
       Lookup: {
         '@odata.type': 'Microsoft.Dynamics.CRM.LookupAttributeMetadata',
+        AttributeType: 'Lookup',
+        AttributeTypeName: { Value: 'LookupType' },
         SchemaName: lookupSchemaName,
-        DisplayName: {
-          LocalizedLabels: [{ Label: lookupDisplayName, LanguageCode: 1033 }],
-        },
-        RequiredLevel: { Value: 'None' },
+        DisplayName: label(lookupDisplayName),
+        Description: label(`Migrated from Project Online: ${lookupDisplayName}`),
+        RequiredLevel: { Value: 'None', CanBeChanged: true, ManagedPropertyLogicalName: 'canmodifyrequirementlevelsettings' },
       },
     },
   }

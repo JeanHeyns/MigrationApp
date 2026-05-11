@@ -1,6 +1,6 @@
 import type { ResolverPlan, ResolverEntry, ColumnMetaType, GlobalOptionSetMeta } from '../../models/dataOnly.types'
 import type { FieldMapping, OptionSetMapping } from '../../models/mapping.types'
-import { listAllRecords, fetchGlobalOptionSetFull } from '../dataverseService'
+import { fetchEntityDefinition, fetchEntityManyToOneRelationships, listAllRecords, fetchGlobalOptionSetFull } from '../dataverseService'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -71,25 +71,25 @@ export function clearResolverCaches(): void {
  * Enables applyResolvers() to be used in both full and dataOnly modes so the
  * two paths cannot diverge.
  */
-export function buildFullModeResolverMap(
+export async function buildFullModeResolverMap(
   fieldMappings: FieldMapping[],
   optionSetMappings: OptionSetMapping[],
-): Map<string, FieldResolver> {
+): Promise<Map<string, FieldResolver>> {
   const resolvers = new Map<string, FieldResolver>()
   for (const mapping of fieldMappings) {
     if (mapping.skip || !mapping.migrateValue) continue
     const fieldKey = mapping.customField.ODataFieldName
     if (!fieldKey) continue
-    const resolver = buildFullModeFieldResolver(mapping, optionSetMappings)
+    const resolver = await buildFullModeFieldResolver(mapping, optionSetMappings)
     if (resolver) resolvers.set(fieldKey, resolver)
   }
   return resolvers
 }
 
-function buildFullModeFieldResolver(
+async function buildFullModeFieldResolver(
   mapping: FieldMapping,
   optionSetMappings: OptionSetMapping[],
-): FieldResolver | null {
+): Promise<FieldResolver | null> {
   switch (mapping.targetColumnType) {
     case 'Boolean':
       return {
@@ -124,14 +124,15 @@ function buildFullModeFieldResolver(
       }
     case 'OptionSet': {
       const osm = optionSetMappings.find(m => m.lookupTableUID === mapping.lookupTable?.LookupTableUID)
+      const valueMap = buildFullModeOptionValueMap(osm)
       return {
         fieldType: 'Picklist',
         resolve: (v) => {
           if (v == null || v === '') return { status: 'empty' }
           const label = String(v)
-          const resolved = osm?.valueMap[label]
+          const resolved = valueMap.get(normalize(label))
           const fallback = resolved === undefined && mapping.manualDefault
-            ? osm?.valueMap[mapping.manualDefault]
+            ? valueMap.get(normalize(mapping.manualDefault))
             : undefined
           const value = resolved ?? fallback
           return value !== undefined
@@ -142,6 +143,7 @@ function buildFullModeFieldResolver(
     }
     case 'MultiSelectOptionSet': {
       const osm = optionSetMappings.find(m => m.lookupTableUID === mapping.lookupTable?.LookupTableUID)
+      const valueMap = buildFullModeOptionValueMap(osm)
       return {
         fieldType: 'MultiSelectPicklist',
         resolve: (v) => {
@@ -150,7 +152,7 @@ function buildFullModeFieldResolver(
             .split(/[;,]/)
             .map(s => s.trim())
             .filter(Boolean)
-            .map(label => osm?.valueMap[label])
+            .map(label => valueMap.get(normalize(label)))
             .filter((n): n is number => n !== undefined)
           return values.length > 0
             ? { status: 'resolved', value: values.join(',') }
@@ -159,26 +161,100 @@ function buildFullModeFieldResolver(
       }
     }
     case 'Lookup': {
-      const col = mapping.relatedEntity?.logicalCollectionName
-      if (!col) return null
-      const targetName = mapping.targetLogicalName
-      return {
-        fieldType: 'Lookup',
-        resolve: (v) => {
-          if (v == null || v === '') return { status: 'empty' }
-          const guid = String(v).replace(/[{}]/g, '')
-          if (!guid) return { status: 'empty' }
-          return {
-            status: 'resolved',
-            bindKey: `${targetName}@odata.bind`,
-            bindValue: `/${col}(${guid})`,
-          }
-        },
-      }
+      return buildFullModeLookupResolver(mapping)
     }
     default:
       // Text, Memo, Date, DateTime — applyResolvers falls back to direct pass-through
       return null
+  }
+}
+
+function buildFullModeOptionValueMap(osm: OptionSetMapping | undefined): Map<string, number> {
+  const map = new Map<string, number>()
+  for (const [key, value] of Object.entries(osm?.valueMap ?? {})) {
+    const normalized = normalize(key)
+    if (normalized && !map.has(normalized)) map.set(normalized, value)
+  }
+  return map
+}
+
+const FULL_MODE_ENTITY_MAP: Partial<Record<string, string>> = {
+  Project: 'msdyn_project',
+  Task: 'msdyn_projecttask',
+}
+
+async function buildFullModeLookupResolver(mapping: FieldMapping): Promise<FieldResolver | null> {
+  const targetEntity = mapping.relatedEntity?.logicalName
+  if (!targetEntity) return null
+
+  const entity = await fetchEntityDefinition(targetEntity)
+  const targetEntitySet = entity?.entitySetName ?? mapping.relatedEntity?.logicalCollectionName
+  const primaryNameField = entity?.primaryNameField
+  if (!targetEntitySet || !primaryNameField) return unresolvedResolver('Lookup')
+
+  const referencingEntity = FULL_MODE_ENTITY_MAP[mapping.customField.CustomFieldEntityType]
+  const lookupLogicalName = mapping.targetLogicalName.toLowerCase()
+  let navigationProperty = mapping.targetLogicalName
+
+  if (referencingEntity) {
+    try {
+      const rels = await fetchEntityManyToOneRelationships(referencingEntity)
+      const rel = rels.find(r =>
+        r.ReferencingAttribute === lookupLogicalName &&
+        r.ReferencedEntity === targetEntity
+      )
+      navigationProperty = rel?.ReferencingEntityNavigationPropertyName ?? navigationProperty
+    } catch {
+      // Fallback to the lookup logical name; this is valid for many custom lookups.
+    }
+  }
+
+  const idField = `${targetEntity}id`
+  let records: Record<string, unknown>[] = []
+  try {
+    records = await listAllRecords(
+      targetEntitySet,
+      [idField, primaryNameField],
+      { maxRecords: LARGE_TABLE_THRESHOLD + 1 },
+    )
+  } catch {
+    return unresolvedResolver('Lookup')
+  }
+
+  if (records.length > LARGE_TABLE_THRESHOLD) records = records.slice(0, LARGE_TABLE_THRESHOLD)
+
+  const nameMap = new Map<string, string>()
+  for (const rec of records) {
+    const name = normalize(String(rec[primaryNameField] ?? ''))
+    const id = String(rec[idField] ?? '').replace(/[{}]/g, '')
+    if (name && id && !nameMap.has(name)) nameMap.set(name, id)
+  }
+
+  const sourceLabelMap = new Map<string, string[]>()
+  for (const entry of mapping.lookupTable?.entries ?? []) {
+    sourceLabelMap.set(normalize(entry.LookupEntryUID), [
+      entry.LookupEntryFullValue,
+      entry.LookupEntryValue,
+    ].filter((value): value is string => !!value))
+  }
+
+  return {
+    fieldType: 'Lookup',
+    resolve: (poValue) => {
+      if (poValue == null || poValue === '') return { status: 'empty' }
+      const raw = String(poValue)
+      const candidates = [raw, ...(sourceLabelMap.get(normalize(raw)) ?? [])]
+      const guid = candidates
+        .map(candidate => nameMap.get(normalize(candidate)))
+        .find((value): value is string => !!value)
+      if (!guid) return { status: 'unresolved', originalLabel: raw }
+      return {
+        status: 'resolved',
+        bindKey: `${navigationProperty}@odata.bind`,
+        bindValue: `/${targetEntitySet}(${guid})`,
+        originalLabel: raw,
+      }
+    },
   }
 }
 

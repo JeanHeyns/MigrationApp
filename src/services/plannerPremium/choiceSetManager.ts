@@ -55,6 +55,8 @@ export async function createOptionSets(
     const options = table.entries.map((entry, idx) => {
       const val = idx + 1
       valueMap[entry.LookupEntryUID] = val
+      if (entry.LookupEntryFullValue) valueMap[entry.LookupEntryFullValue] = val
+      if (entry.LookupEntryValue) valueMap[entry.LookupEntryValue] = val
       return {
         '@odata.type': 'Microsoft.Dynamics.CRM.OptionMetadata',
         Value: val,

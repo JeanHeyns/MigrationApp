@@ -199,7 +199,7 @@ export const client = getClient({
       },
       // Create a 1:N relationship (also creates the lookup attribute on the referencing entity)
       CreateOneToManyRelationship: {
-        path: '/{connectionId}/api/data/v9.2/CreateOneToMany',
+        path: '/{connectionId}/api/data/v9.2/RelationshipDefinitions',
         method: 'POST',
         parameters: [
           { name: 'connectionId',             in: 'path',   required: true,  type: 'string' },

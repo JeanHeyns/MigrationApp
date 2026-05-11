@@ -2,16 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Button,
   Checkbox,
-  Divider,
   MessageBar,
   MessageBarBody,
   Select,
-  Spinner,
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
-import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import {
   fetchEntityAttributes,
   fetchEntityDefinitions,
@@ -23,11 +20,9 @@ import {
   type DvGlobalOptionSetDefinition,
 } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
-import { fetchResourcesByIds } from '../../services/projectOnline/resources'
 import { lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
-import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoLookupTable, PoResource } from '../../models/projectOnline.types'
-import type { DataverseColumnType, FieldMapping, MappingConfiguration, OwnerMapping } from '../../models/mapping.types'
-import type { DvSystemUser } from '../../models/plannerPremium.types'
+import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoLookupTable } from '../../models/projectOnline.types'
+import type { DataverseColumnType, FieldMapping, MappingConfiguration } from '../../models/mapping.types'
 import type { ColumnMeta, ColumnMetaType, EntitySchema, ResolverEntry, ResolverPlan, SchemaSnapshot } from '../../models/dataOnly.types'
 
 // ─── Type mappings ────────────────────────────────────────────────────────────
@@ -296,42 +291,6 @@ function buildSchemaOnlyMappings(data: PoFetchedData, prefix: string): FieldMapp
   })
 }
 
-function ownerResourceId(p: { ProjectOwnerResourceId?: string; ProjectOwnerResourceUid?: string }): string | undefined {
-  return p.ProjectOwnerResourceId ?? p.ProjectOwnerResourceUid
-}
-
-function buildOwnerMappings(
-  data: PoFetchedData,
-  systemUsers: DvSystemUser[],
-  ownerResources: PoResource[],
-): OwnerMapping[] {
-  const ownerUids = [...new Set(
-    data.projects.map(ownerResourceId).filter(Boolean) as string[]
-  )]
-  return ownerUids.map(uid => {
-    const resource = ownerResources.find(r => r.ResourceId === uid)
-      ?? data.resources.find(r => (r.ResourceId ?? r.ResourceUID) === uid)
-    const name = resource?.ResourceName ?? uid
-    const email = resource?.ResourceEmailAddress
-    const ntAccount = resource?.ResourceNTAccount
-
-    const matched = systemUsers.find(u =>
-      (email && u.internalemailaddress?.toLowerCase() === email.toLowerCase()) ||
-      u.fullname?.toLowerCase() === name.toLowerCase() ||
-      (ntAccount && u.domainname?.toLowerCase() === ntAccount.toLowerCase())
-    )
-
-    return {
-      poResourceUid: uid,
-      poOwnerName: name,
-      poOwnerEmail: email,
-      dataverseSystemUserId:   matched?.systemuserid,
-      dataverseSystemUserName: matched?.fullname,
-      matched: !!matched,
-    }
-  })
-}
-
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const useStyles = makeStyles({
@@ -393,15 +352,6 @@ const useStyles = makeStyles({
     maxWidth: '190px',
     overflow: 'hidden',
   },
-  ownerTable: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
-  ownerRow: { borderBottom: `1px solid ${tokens.colorNeutralStroke2}` },
-  matchBadge: {
-    display: 'inline-block',
-    padding: '2px 8px',
-    borderRadius: '10px',
-    fontSize: '11px',
-    fontWeight: '600',
-  },
   footer: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' },
   summary: { fontSize: '13px', color: tokens.colorNeutralForeground3 },
 })
@@ -412,23 +362,19 @@ export function Step2Mapping() {
   const styles = useStyles()
   const {
     fetchedData, mappingConfig, setMappingConfig, nextStep, prevStep,
-    selectedSolution, skipColumnCreation, dataSource,
+    selectedSolution, skipColumnCreation,
     migrationMode, schemaSnapshot, setResolverPlan, setMigrationMode,
   } = useMigration()
 
   const prefix = selectedSolution?.publisherPrefix ?? 'cr9a1'
 
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>([])
-  const [ownerMappings, setOwnerMappings] = useState<OwnerMapping[]>([])
-  const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
   const [solutionEntityIds, setSolutionEntityIds] = useState<Set<string>>(new Set())
   const [globalOptionSets, setGlobalOptionSets] = useState<DvGlobalOptionSetDefinition[]>([])
   const [solutionOptionSetIds, setSolutionOptionSetIds] = useState<Set<string>>(new Set())
-  const [loadingUsers, setLoadingUsers] = useState(false)
-  const [userLoadError, setUserLoadError] = useState<string | null>(null)
   const [loadWarning, setLoadWarning] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -439,7 +385,6 @@ export function Step2Mapping() {
     if (!fetchedData) return
     if (mappingConfig) {
       setFieldMappings(mappingConfig.fieldMappings)
-      setOwnerMappings(mappingConfig.ownerMappings)
       return
     }
     if (migrationMode === 'dataOnly' && schemaSnapshot) {
@@ -487,28 +432,6 @@ export function Step2Mapping() {
       })
       .catch(() => { /* non-fatal - schemaOnly can still create new choices */ })
   }, [selectedSolution?.solutionid])
-
-  // Load Dataverse system users and owner resources for owner matching
-  useEffect(() => {
-    if (!fetchedData || migrationMode === 'schemaOnly') return
-    setLoadingUsers(true)
-    const ownerIds = [...new Set(
-      fetchedData.projects.map(ownerResourceId).filter(Boolean) as string[]
-    )]
-    const ownerResourcesPromise = dataSource === 'ProjectOnline'
-      ? fetchResourcesByIds(fetchedData.pwaUrl, ownerIds)
-      : Promise.resolve([] as import('../../models/projectOnline.types').PoResource[])
-
-    Promise.all([fetchSystemUsers(), ownerResourcesPromise])
-      .then(([users, ownerResources]) => {
-        setSystemUsers(users)
-        if (!mappingConfig) {
-          setOwnerMappings(buildOwnerMappings(fetchedData, users, ownerResources))
-        }
-      })
-      .catch(e => setUserLoadError(String(e)))
-      .finally(() => setLoadingUsers(false))
-  }, [fetchedData]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!fetchedData) {
     return (
@@ -623,20 +546,6 @@ export function Step2Mapping() {
     }))
   }
 
-  // ── Owner mapping handlers ────────────────────────────────────────────────
-
-  function setOwnerUser(idx: number, userId: string) {
-    const user = systemUsers.find(u => u.systemuserid === userId)
-    setOwnerMappings(prev => prev.map((m, i) =>
-      i === idx ? {
-        ...m,
-        dataverseSystemUserId: user?.systemuserid,
-        dataverseSystemUserName: user?.fullname,
-        matched: !!user,
-      } : m
-    ))
-  }
-
   // ── Save / Load JSON ─────────────────────────────────────────────────────
 
   function handleSaveJson() {
@@ -646,7 +555,7 @@ export function Step2Mapping() {
       skipColumnCreation,
       migrationMode,
       fieldMappings,
-      ownerMappings,
+      ownerMappings: [],
       savedAt: new Date().toISOString(),
     }
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
@@ -666,7 +575,6 @@ export function Step2Mapping() {
       try {
         const config = JSON.parse(ev.target?.result as string) as MappingConfiguration
         setFieldMappings(config.fieldMappings)
-        setOwnerMappings(config.ownerMappings)
         const loadedMode = config.migrationMode ?? 'full'
         setMigrationMode(loadedMode)
         if (loadedMode === 'dataOnly' && !schemaSnapshot) {
@@ -710,7 +618,7 @@ export function Step2Mapping() {
       skipColumnCreation,
       migrationMode,
       fieldMappings,
-      ownerMappings,
+      ownerMappings: [],
       savedAt: new Date().toISOString(),
     }
     setMappingConfig(config)
@@ -722,7 +630,6 @@ export function Step2Mapping() {
 
   const activeFields = fieldMappings.filter(m => !m.skip)
   const migratingFields = fieldMappings.filter(m => !m.skip && m.migrateValue)
-  const unmatchedOwners = ownerMappings.filter(m => !m.matched)
   const solutionEntities = dvEntities.filter(e =>
     solutionEntityIds.has((e.metadataId ?? '').toLowerCase().replace(/[{}]/g, ''))
   )
@@ -796,11 +703,7 @@ export function Step2Mapping() {
           </span>
         ) : (
         <span className={styles.summary}>
-          {activeFields.length} of {fieldMappings.length} fields active · {migratingFields.length} value(s) will migrate ·{' '}
-          {unmatchedOwners.length > 0
-            ? <span style={{ color: tokens.colorPaletteRedForeground1 }}>{unmatchedOwners.length} owner(s) unmatched</span>
-            : <span style={{ color: '#107c10' }}>all owners matched</span>
-          }
+          {activeFields.length} of {fieldMappings.length} fields active · {migratingFields.length} value(s) will migrate
         </span>
         )}
       </div>
@@ -1071,75 +974,6 @@ export function Step2Mapping() {
             ))}
           </tbody>
         </table>
-      </div>
-
-      {migrationMode !== 'schemaOnly' && <Divider />}
-
-      {/* ── Owner mapping ── */}
-      <div style={{ display: migrationMode === 'schemaOnly' ? 'none' : undefined }}>
-        <div className={styles.sectionTitle}>
-          Project Owner Mapping
-          {loadingUsers && <Spinner size="tiny" style={{ marginLeft: '8px' }} />}
-        </div>
-
-        {userLoadError && (
-          <MessageBar intent="warning" style={{ marginBottom: '12px' }}>
-            <MessageBarBody>Could not load Dataverse users: {userLoadError}</MessageBarBody>
-          </MessageBar>
-        )}
-
-        {ownerMappings.length === 0 && !loadingUsers && (
-          <p style={{ color: tokens.colorNeutralForeground3, fontSize: '13px' }}>
-            No project owners found, or no owner field present in the fetched projects.
-          </p>
-        )}
-
-        {ownerMappings.length > 0 && (
-          <table className={styles.ownerTable}>
-            <thead>
-              <tr>
-                <th className={styles.th}>Project Online Owner</th>
-                <th className={styles.th}>Email</th>
-                <th className={styles.th}>Match Status</th>
-                <th className={styles.th}>Dataverse User</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ownerMappings.map((om, idx) => (
-                <tr key={om.poResourceUid} className={styles.ownerRow}>
-                  <td className={styles.td}>{om.poOwnerName}</td>
-                  <td className={styles.td} style={{ color: tokens.colorNeutralForeground3 }}>
-                    {om.poOwnerEmail ?? '—'}
-                  </td>
-                  <td className={styles.td}>
-                    <span
-                      className={styles.matchBadge}
-                      style={{
-                        background: om.matched ? '#dff6dd' : '#fde7e9',
-                        color: om.matched ? '#107c10' : '#a4262c',
-                      }}
-                    >
-                      {om.matched ? '✓ Matched' : '✗ Unmatched'}
-                    </span>
-                  </td>
-                  <td className={styles.td}>
-                    <Select
-                      size="small"
-                      value={om.dataverseSystemUserId ?? ''}
-                      onChange={(_, d) => setOwnerUser(idx, d.value)}
-                      disabled={loadingUsers}
-                    >
-                      <option value="">— Select user —</option>
-                      {systemUsers.map(u => (
-                        <option key={u.systemuserid} value={u.systemuserid}>{u.fullname}</option>
-                      ))}
-                    </Select>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
       </div>
 
       {/* ── dataOnly no-snapshot warning ── */}

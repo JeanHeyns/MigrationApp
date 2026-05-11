@@ -37,6 +37,7 @@ export async function writeProjects(
   optionSetMappings: OptionSetMapping[] = [],
   onProgress?: (result: ProjectWriteResult) => void,
   resolvers?: Map<string, FieldResolver>,
+  ownerOverrides?: Record<string, string>,
 ): Promise<ProjectWriteResult[]> {
   const results: ProjectWriteResult[] = []
   const sourceIdColumn = projectOnlineIdColumnName(mappingConfig.publisherPrefix)
@@ -53,7 +54,7 @@ export async function writeProjects(
 
   const effectiveResolvers = dataOnly
     ? resolvers!
-    : buildFullModeResolverMap(mappingConfig.fieldMappings, optionSetMappings)
+    : await buildFullModeResolverMap(mappingConfig.fieldMappings, optionSetMappings)
 
   let isFirstProject = true
 
@@ -65,6 +66,7 @@ export async function writeProjects(
       if (existingId) {
         const { error, skippedFields } = await applyProjectPatch(
           existingId, project, mappingConfig, effectiveResolvers, isFirstProject,
+          ownerOverrides?.[project.ProjectId],
         )
         isFirstProject = false
         const result: ProjectWriteResult = {
@@ -99,6 +101,7 @@ export async function writeProjects(
       if (dvProjectId) {
         const patchResult = await applyProjectPatch(
           dvProjectId, project, mappingConfig, effectiveResolvers, isFirstProject,
+          ownerOverrides?.[project.ProjectId],
         )
         patchError = patchResult.error
         skippedFields = patchResult.skippedFields
@@ -143,16 +146,21 @@ async function applyProjectPatch(
   mappingConfig: MappingConfiguration,
   resolvers: Map<string, FieldResolver>,
   logPayload: boolean,
+  ownerOverride?: string,
 ): Promise<PatchResult> {
   const ownerResourceId = project.ProjectOwnerResourceId ?? project.ProjectOwnerResourceUid
-  const ownerMapping = ownerResourceId
+  const mappingUserId = ownerResourceId
     ? mappingConfig.ownerMappings.find(
         m => m.poResourceUid === ownerResourceId && m.matched && m.dataverseSystemUserId,
-      )
+      )?.dataverseSystemUserId
     : undefined
+  const resolvedOwnerId = ownerOverride ?? mappingUserId
 
-  const ownerBind = ownerMapping?.dataverseSystemUserId
-    ? { 'msdyn_projectmanager@odata.bind': `/systemusers(${ownerMapping.dataverseSystemUserId})` }
+  const ownerBind = resolvedOwnerId
+    ? {
+        'msdyn_projectmanager@odata.bind': `/systemusers(${resolvedOwnerId})`,
+        'ownerid@odata.bind': `/systemusers(${resolvedOwnerId})`,
+      }
     : {}
 
   const projectFieldMappings = mappingConfig.fieldMappings.filter(
