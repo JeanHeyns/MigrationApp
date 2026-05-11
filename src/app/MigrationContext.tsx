@@ -134,12 +134,8 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const clearSkippedFieldInstances = useCallback(() => setSkippedFieldInstances([]), [])
 
   const resetState = useCallback(() => {
-    clearDataverseOrgUrl()
     setCurrentStep(1)
     setPwaUrl('')
-    setDataverseOrgUrlState(null)
-    setDataverseUrlSource('loading')
-    setDataverseUrlErrorState(null)
     setDataSource('ProjectOnline')
     setSelectedSolution(null)
     setSkipColumnCreation(false)

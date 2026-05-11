@@ -203,9 +203,7 @@ export function Step5Report() {
   }
 
   function handleStartNew() {
-    if (window.confirm('Start a new migration? Current results will be cleared.')) {
-      resetState()
-    }
+    resetState()
   }
 
   const showImportReport = migrationMode !== 'schemaOnly'
