@@ -76,6 +76,34 @@ The template path supports project metadata, tasks, resources, assignments, depe
 - OperationSet writes are batched because Dataverse has schedule API limits.
 - The target Dataverse organization URL is configured in `src/config/environment.ts`.
 
+## Managed Solution Download
+
+The Power Platform app is packaged as the managed solution `MigrationToolApp`.
+
+Download the latest exported managed solution from this repository:
+
+[Download MigrationToolApp managed solution](https://github.com/JeanHeyns/MigrationApp/raw/main/powerplatform/solutions/MigrationToolApp_managed.zip)
+
+This managed solution contains:
+
+- the MigrationApp Power Apps Code App
+- the `Dataverse Organization URL` environment variable
+
+Environment variable details:
+
+```text
+Display name: Dataverse Organization URL
+Logical name: exp_dataverseorgurl
+```
+
+After importing the managed solution into a Power Platform environment, set the environment variable value to that environment's Dataverse organization URL, for example:
+
+```text
+https://dev-jehe.crm4.dynamics.com/
+```
+
+The solution selected inside Step 1 of the app is separate from this app package. Step 1 should still point at the target unmanaged solution where migration columns, option sets, lookup entities, and schema metadata should be created or validated.
+
 ## Development
 
 Install dependencies:
