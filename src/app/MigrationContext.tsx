@@ -108,7 +108,7 @@ interface MigrationActions {
   setDataSource: (source: DataSource) => void
   setSelectedSolution: (solution: DvSolution | null) => void
   setSkipColumnCreation: (skip: boolean) => void
-  setFetchedData: (data: PoFetchedData) => void
+  setFetchedData: (data: PoFetchedData | null) => void
   setSelectedProjectIds: (ids: Set<string>) => void
   toggleProjectSelection: (id: string) => void
   selectProjectsByIds: (ids: string[]) => void
@@ -262,10 +262,20 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     })
   }, [])
 
-  const setFetchedData = useCallback((data: PoFetchedData) => {
+  const setFetchedData = useCallback((data: PoFetchedData | null) => {
     setFetchedDataState(data)
-    setSelectedProjectIds(new Set(data.projects.map(p => p.ProjectId)))
+    setSelectedProjectIds(new Set(data?.projects.map(p => p.ProjectId) ?? []))
     setProjectFilterState(emptyFilter())
+    setMappingConfig(null)
+    setOptionSetMappings([])
+    setImportResults([])
+    setSchemaSnapshot(null)
+    setResolverPlan(null)
+    setSkippedFieldInstances([])
+    setSchemaCreationResults(null)
+    setImportProgress(null)
+    setStopRequested(false)
+    setImportWasStopped(false)
   }, [])
 
   const toggleProjectSelection = useCallback((id: string) => {

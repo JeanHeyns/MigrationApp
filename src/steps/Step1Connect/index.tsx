@@ -400,19 +400,28 @@ export function Step1Connect() {
     }
 
     if (dataSource === 'FileUpload') {
-      if (!uploadResult) {
-        setUploadError('Choose and parse a file before fetching.')
+      if (!uploadedFile) {
+        setUploadError('Choose a file before loading.')
         return
       }
       setGlobalError(null)
+      setUploadError(null)
       setScanError(null)
       setModeNotice(null)
-      setFetchedData(uploadResult)
-      if (migrationMode === 'dataOnly') {
-        await runScan()
-      } else {
-        setSchemaSnapshot(null)
-        setResolverPlan(null)
+      setSchemaSnapshot(null)
+      setResolverPlan(null)
+      setUploadParsing(true)
+      try {
+        const parsed = await parseWorkbook(uploadedFile)
+        setUploadResult(parsed.fetchedData)
+        setFetchedData(parsed.fetchedData)
+        if (migrationMode === 'dataOnly') {
+          await runScan()
+        }
+      } catch (err) {
+        setUploadError(String(err))
+      } finally {
+        setUploadParsing(false)
       }
       return
     }
@@ -447,16 +456,12 @@ export function Step1Connect() {
     setUploadedFile(file)
     setUploadError(null)
     setUploadResult(null)
+    setFetchedData(null)
     setModeNotice(null)
-    setUploadParsing(true)
-    try {
-      const result = await parseWorkbook(file)
-      setUploadResult(result.fetchedData)
-    } catch (err) {
-      setUploadError(String(err))
-    } finally {
-      setUploadParsing(false)
-    }
+    setSchemaSnapshot(null)
+    setResolverPlan(null)
+    setScanPhase('idle')
+    setScanError(null)
   }
 
   function handleDownloadTemplate() {
@@ -486,14 +491,20 @@ export function Step1Connect() {
   }
 
   function handleSourceChange(source: string) {
+    if (source === dataSource) return
     setDataSource(source as 'ProjectOnline' | 'FileUpload')
-    // Reset results when switching source
+    // Reset source-specific and downstream data when switching source.
+    setFetchedData(null)
     setResult(null)
     setUploadResult(null)
     setUploadedFile(null)
     setUploadError(null)
     setGlobalError(null)
     setModeNotice(null)
+    setSchemaSnapshot(null)
+    setResolverPlan(null)
+    setScanPhase('idle')
+    setScanError(null)
     setPhase('idle')
     setItems(INITIAL_ITEMS)
   }
@@ -551,12 +562,12 @@ export function Step1Connect() {
 
   // ── canProceed logic ─────────────────────────────────────────────────────
   const activeResult = getActiveResult()
-  const isFetching  = phase === 'fetching' || scanPhase === 'scanning'
+  const isFetching  = phase === 'fetching' || scanPhase === 'scanning' || uploadParsing
   const isDone      = phase === 'done' || phase === 'error'
   const hasCompletedFetch = !!activeResult && fetchedData === activeResult
   const sourceValid = dataSource === 'ProjectOnline'
     ? localUrl.trim().replace(/\/$/, '').startsWith('https://')
-    : !!uploadResult && !uploadParsing
+    : !!uploadedFile && !uploadParsing
   const fetchButtonEnabled = !!migrationMode && sourceValid && !!selectedSolution && !isFetching
   const needsRefetch = !!activeResult
     && migrationMode !== 'schemaOnly'
@@ -586,11 +597,20 @@ export function Step1Connect() {
         { label: 'Lookup Tables',count: activeResult.lookupTables.length },
       ]
     : []
-  const fetchButtonLabel = migrationMode === 'schemaOnly'
-    ? 'Fetch schema metadata'
-    : migrationMode === 'dataOnly'
-      ? 'Fetch PWA data and scan target schema'
-      : 'Fetch PWA data'
+  const fetchButtonLabel = dataSource === 'FileUpload'
+    ? migrationMode === 'dataOnly'
+      ? 'Load uploaded file and scan target schema'
+      : migrationMode === 'schemaOnly'
+        ? 'Load uploaded schema metadata'
+        : 'Load uploaded file'
+    : migrationMode === 'schemaOnly'
+      ? 'Fetch schema metadata'
+      : migrationMode === 'dataOnly'
+        ? 'Fetch PWA data and scan target schema'
+        : 'Fetch PWA data'
+  const actionHint = dataSource === 'FileUpload'
+    ? 'Load is enabled once a file is selected and a target solution is selected.'
+    : 'Fetch is enabled once mode, source, and target are valid.'
   const lookupEntryCount = activeResult?.lookupTables.reduce((sum, table) => sum + table.entries.length, 0) ?? 0
 
   return (
@@ -803,7 +823,7 @@ export function Step1Connect() {
           <div>
             <div className={styles.sectionTitle}>Fetch action</div>
             <div className={styles.actionHint}>
-              Fetch is enabled once mode, source, and target are valid.
+              {actionHint}
             </div>
           </div>
           <Button
@@ -812,7 +832,7 @@ export function Step1Connect() {
             disabled={!fetchButtonEnabled}
             icon={isFetching ? <Spinner size="tiny" /> : undefined}
           >
-            {isFetching ? 'Fetching…' : fetchButtonLabel}
+            {isFetching ? (dataSource === 'FileUpload' ? 'Loading…' : 'Fetching…') : fetchButtonLabel}
           </Button>
         </div>
 
