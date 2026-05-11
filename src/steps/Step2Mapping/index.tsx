@@ -45,33 +45,45 @@ const DV_ATTR_TYPE_MAP: Record<string, DataverseColumnType> = {
 
 const PO_COMPATIBLE_ATTR_TYPES: Record<PoCustomFieldType, string[]> = {
   Text:        ['String', 'Memo'],
+  Memo:        ['Memo', 'String'],
   Number:      ['Integer', 'Decimal', 'Double', 'Money'],
   Cost:        ['Money', 'Decimal'],
   Duration:    ['Integer', 'Decimal'],
   Date:        ['DateTime'],
   Flag:        ['Boolean'],
+  Boolean:     ['Boolean'],
+  Choice:      ['Picklist'],
+  MultiChoice: ['MultiSelectPicklist'],
   Lookup:      ['Picklist', 'Lookup', 'Owner'],
   LookupMulti: ['MultiSelectPicklist'],
 }
 
 const SUGGESTED_DV_TYPE: Record<PoCustomFieldType, DataverseColumnType> = {
   Text:        'Text',
+  Memo:        'Memo',
   Number:      'Decimal',
   Cost:        'Currency',
   Duration:    'Integer',
   Date:        'Date',
   Flag:        'Boolean',
+  Boolean:     'Boolean',
+  Choice:      'OptionSet',
+  MultiChoice: 'MultiSelectOptionSet',
   Lookup:      'OptionSet',
   LookupMulti: 'MultiSelectOptionSet',
 }
 
 const DV_TYPE_ALTERNATIVES: Record<PoCustomFieldType, DataverseColumnType[]> = {
   Text:        ['Text', 'Memo'],
+  Memo:        ['Memo', 'Text'],
   Number:      ['Decimal', 'Integer'],
   Cost:        ['Currency'],
   Duration:    ['Integer', 'Decimal'],
   Date:        ['Date', 'DateTime'],
   Flag:        ['Boolean'],
+  Boolean:     ['Boolean'],
+  Choice:      ['OptionSet'],
+  MultiChoice: ['MultiSelectOptionSet'],
   Lookup:      ['OptionSet', 'Lookup'],
   LookupMulti: ['MultiSelectOptionSet'],
 }

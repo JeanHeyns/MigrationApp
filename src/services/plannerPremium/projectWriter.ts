@@ -196,14 +196,19 @@ async function applyProjectPatch(
   }
 }
 
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 async function findExistingProject(project: PoProject): Promise<Record<string, unknown>[]> {
-  const byId = await listRecords(
-    'msdyn_projects',
-    'msdyn_projectid,msdyn_subject',
-    `msdyn_projectid eq ${cleanGuid(project.ProjectId)}`,
-    1,
-  )
-  if (byId.length > 0) return byId
+  const guid = cleanGuid(project.ProjectId)
+  if (guid && GUID_RE.test(guid)) {
+    const byId = await listRecords(
+      'msdyn_projects',
+      'msdyn_projectid,msdyn_subject',
+      `msdyn_projectid eq ${guid.toLowerCase()}`,
+      1,
+    )
+    if (byId.length > 0) return byId
+  }
 
   return listRecords(
     'msdyn_projects',

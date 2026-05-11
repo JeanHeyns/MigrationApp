@@ -1,10 +1,14 @@
 export type PoCustomFieldType =
   | 'Text'
+  | 'Memo'
   | 'Number'
   | 'Cost'
   | 'Duration'
   | 'Date'
   | 'Flag'
+  | 'Boolean'
+  | 'Choice'
+  | 'MultiChoice'
   | 'Lookup'
   | 'LookupMulti'
 
@@ -90,6 +94,7 @@ export interface PoCustomField {
   CustomFieldLookupTableUID?: string
   LookupTableName?: string
   ODataFieldName?: string
+  DataverseLogicalName?: string // file-upload only: explicit mapping to existing DV column (dataOnly mode)
 }
 
 export interface PoLookupEntry {

@@ -351,8 +351,10 @@ export function Step1Connect() {
     const fullSteps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
       ...(migrationScope.tasks ? [
-        { key: 'tasks' as const,        fn: () => fetchTasks(url) },
-        { key: 'dependencies' as const, fn: () => fetchDependencies(url, data.projects) },
+        { key: 'tasks' as const, fn: () => fetchTasks(url) },
+        ...(migrationScope.dependencies ? [
+          { key: 'dependencies' as const, fn: () => fetchDependencies(url, data.projects) },
+        ] : []),
       ] : []),
       ...(migrationScope.resources ? [
         { key: 'resources' as const, fn: () => fetchResources(url) },
@@ -448,8 +450,8 @@ export function Step1Connect() {
     setModeNotice(null)
     setUploadParsing(true)
     try {
-      const data = await parseWorkbook(file)
-      setUploadResult(data)
+      const result = await parseWorkbook(file)
+      setUploadResult(result.fetchedData)
     } catch (err) {
       setUploadError(String(err))
     } finally {
@@ -704,7 +706,6 @@ export function Step1Connect() {
         {dataSource === 'FileUpload' && (
           <div className={styles.uploadBox}>
             <div className={styles.templateRow}>
-              <ArrowDownloadRegular style={{ fontSize: '16px' }} />
               <span>Download the migration template, fill it in, then upload it here.</span>
               <Button
                 appearance="subtle"
@@ -949,7 +950,9 @@ function buildFetchItems(mode: MigrationMode, scope: MigrationScope): FetchItem[
   ]
   if (scope.tasks) {
     items.push({ key: 'tasks', label: 'Tasks', status: 'pending', count: 0 })
-    items.push({ key: 'dependencies', label: 'Dependencies', status: 'pending', count: 0 })
+    if (scope.dependencies) {
+      items.push({ key: 'dependencies', label: 'Dependencies', status: 'pending', count: 0 })
+    }
   }
   if (scope.resources) {
     items.push({ key: 'resources', label: 'Resources', status: 'pending', count: 0 })
