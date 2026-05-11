@@ -17,6 +17,7 @@ export interface PoProject {
   ProjectStatus?: string
   ProjectType?: number
   ProjectIsAdministrative?: boolean
+  ProjectOwnerName?: string
   ProjectOwnerResourceId?: string   // _api/ProjectData/Projects field name
   ProjectOwnerResourceUid?: string  // fallback alias some tenants return
   [key: string]: unknown

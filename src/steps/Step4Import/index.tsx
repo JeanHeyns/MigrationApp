@@ -90,8 +90,20 @@ export function Step4Import() {
   }, [migrationMode, setCurrentStep])
 
   useEffect(() => {
-    fetchSystemUsers().then(setSystemUsers).catch(() => {})
-  }, [])
+    fetchSystemUsers().then(users => {
+      setSystemUsers(users)
+      if (fetchedData?.projects) {
+        const autoMap: Record<string, string> = {}
+        for (const project of fetchedData.projects) {
+          if (!project.ProjectOwnerName) continue
+          const ownerNameLower = project.ProjectOwnerName.toLowerCase()
+          const match = users.find(u => u.fullname?.toLowerCase() === ownerNameLower)
+          if (match) autoMap[project.ProjectId] = match.systemuserid
+        }
+        setProjectOwnerMap(autoMap)
+      }
+    }).catch(() => {})
+  }, [fetchedData?.projects])
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
