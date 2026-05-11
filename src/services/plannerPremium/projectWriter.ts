@@ -5,7 +5,6 @@ import type { FieldResolver } from './resolverFactory'
 import type { SkippedField } from './recordResolverApplier'
 import { listRecords, performUnboundAction, patchRecord } from './dataverseClient'
 import { cleanGuid, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
-import { projectOnlineIdColumnName } from './columnManager'
 import { applyResolvers } from './recordResolverApplier'
 import { buildFullModeResolverMap } from './resolverFactory'
 
@@ -40,7 +39,6 @@ export async function writeProjects(
   ownerOverrides?: Record<string, string>,
 ): Promise<ProjectWriteResult[]> {
   const results: ProjectWriteResult[] = []
-  const sourceIdColumn = projectOnlineIdColumnName(mappingConfig.publisherPrefix)
   const dataOnly = mappingConfig.migrationMode === 'dataOnly' && !!resolvers
 
   if (dataOnly && isDebug()) {
@@ -60,7 +58,7 @@ export async function writeProjects(
 
   for (const project of projects) {
     try {
-      const existing = await findExistingProject(project, sourceIdColumn)
+      const existing = await findExistingProject(project)
       const existingId = cleanGuid(getRecordId(existing[0] ?? {}, 'msdyn_projectid'))
 
       if (existingId) {
@@ -88,7 +86,6 @@ export async function writeProjects(
           msdyn_subject: project.ProjectName,
           msdyn_description: project.ProjectDescription,
           msdyn_scheduledstart: project.ProjectStartDate,
-          [sourceIdColumn]: project.ProjectId,
         },
       }
 
@@ -199,18 +196,14 @@ async function applyProjectPatch(
   }
 }
 
-async function findExistingProject(project: PoProject, sourceIdColumn: string): Promise<Record<string, unknown>[]> {
-  try {
-    const bySourceId = await listRecords(
-      'msdyn_projects',
-      `msdyn_projectid,msdyn_subject,${sourceIdColumn}`,
-      `${sourceIdColumn} eq '${escapeODataString(project.ProjectId)}'`,
-      1,
-    )
-    if (bySourceId.length > 0) return bySourceId
-  } catch {
-    // Tracking column may not exist in older deployments; fall back to name matching.
-  }
+async function findExistingProject(project: PoProject): Promise<Record<string, unknown>[]> {
+  const byId = await listRecords(
+    'msdyn_projects',
+    'msdyn_projectid,msdyn_subject',
+    `msdyn_projectid eq ${cleanGuid(project.ProjectId)}`,
+    1,
+  )
+  if (byId.length > 0) return byId
 
   return listRecords(
     'msdyn_projects',

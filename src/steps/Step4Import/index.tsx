@@ -10,18 +10,28 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
-import { useMigration } from '../../app/MigrationContext'
+import { useMigration, isFilterActive } from '../../app/MigrationContext'
+import { BulkActions } from '../../components/ProjectSelection/BulkActions'
+import { FilterBar } from '../../components/ProjectSelection/FilterBar'
+import { applyFilter } from '../../utils/projectFilter'
 import { writeResources } from '../../services/plannerPremium/resourceWriter'
 import { writeProjects } from '../../services/plannerPremium/projectWriter'
+import type { ProjectWriteResult } from '../../services/plannerPremium/projectWriter'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
 import { writeTasks } from '../../services/plannerPremium/taskWriter'
+import type { TaskWriteResult } from '../../services/plannerPremium/taskWriter'
 import { writeDependencies } from '../../services/plannerPremium/dependencyWriter'
+import type { DependencyWriteResult } from '../../services/plannerPremium/dependencyWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
+import type { AssignmentWriteResult } from '../../services/plannerPremium/assignmentWriter'
 import { buildResolverMap, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
 import type { FieldResolver } from '../../services/plannerPremium/resolverFactory'
 import type { ImportError, ImportResult } from '../../models/plannerPremium.types'
+import type { PoTask } from '../../models/projectOnline.types'
 import type { SkippedFieldInstance } from '../../models/dataOnly.types'
+import { getConcurrencyLimit, runWithConcurrency } from '../../services/plannerPremium/concurrency'
+import { useBrowserCloseGuard } from '../../hooks/useBrowserCloseGuard'
 
 const useStyles = makeStyles({
   root: { padding: '32px', maxWidth: '1100px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' },
@@ -33,6 +43,9 @@ const useStyles = makeStyles({
     background: tokens.colorNeutralBackground2,
     borderRadius: tokens.borderRadiusMedium,
     border: `1px solid ${tokens.colorNeutralStroke1}`,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
   },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
   th: {
@@ -57,9 +70,16 @@ const useStyles = makeStyles({
     borderRadius: tokens.borderRadiusSmall,
     padding: '10px',
   },
+  progressRow: {
+    display: 'flex',
+    gap: '24px',
+    fontSize: '13px',
+    color: tokens.colorNeutralForeground2,
+    flexWrap: 'wrap',
+  },
 })
 
-type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Projects' | 'Team members' | 'Tasks' | 'Dependencies' | 'Assignments' | 'Done' | 'Failed'
+type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Importing' | 'Done' | 'Stopped' | 'Failed'
 
 export function Step4Import() {
   const styles = useStyles()
@@ -69,10 +89,12 @@ export function Step4Import() {
     migrationMode, resolverPlan,
     addSkippedFieldInstances, clearSkippedFieldInstances,
     addLog, setCurrentStep,
+    migrationScope,
+    importProgress, startImport, completeProject, clearImportProgress,
+    requestStop, clearStopRequest, setImportWasStopped,
   } = useMigration()
-  const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(
-    () => new Set(fetchedData?.projects.map(p => p.ProjectId) ?? []),
-  )
+
+  const { selectedProjectIds, toggleProjectSelection, projectFilter } = useMigration()
   const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
   const [projectOwnerMap, setProjectOwnerMap] = useState<Record<string, string>>({})
   const [phase, setPhase] = useState<Phase>('Ready')
@@ -82,8 +104,12 @@ export function Step4Import() {
   const [total, setTotal] = useState(0)
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
-  const [includeDependencies, setIncludeDependencies] = useState(true)
+  const [stopButtonPressed, setStopButtonPressed] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
   const logRef = useRef<HTMLDivElement>(null)
+  const stopRequestedRef = useRef(false)
+
+  useBrowserCloseGuard(running)
 
   useEffect(() => {
     if (migrationMode === 'schemaOnly') setCurrentStep(5)
@@ -104,6 +130,14 @@ export function Step4Import() {
       }
     }).catch(() => {})
   }, [fetchedData?.projects])
+
+  useEffect(() => {
+    if (!running) { setElapsed(0); return }
+    const interval = setInterval(() => {
+      if (importProgress) setElapsed(Date.now() - importProgress.startedAt.getTime())
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [running, importProgress])
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
@@ -132,6 +166,28 @@ export function Step4Import() {
     [fetchedData?.dependencies, selectedProjectIdLookup],
   )
 
+  const tasksByProjectId = useMemo(() => {
+    const map = new Map<string, PoTask[]>()
+    for (const t of fetchedData?.tasks ?? []) {
+      const arr = map.get(t.ProjectId) ?? []
+      arr.push(t)
+      map.set(t.ProjectId, arr)
+    }
+    return map
+  }, [fetchedData?.tasks])
+
+  const ownerNames = useMemo(() =>
+    [...new Set((fetchedData?.projects ?? []).map(p => p.ProjectOwnerName).filter(Boolean) as string[])].sort(),
+    [fetchedData?.projects],
+  )
+
+  const filteredProjects = useMemo(() =>
+    isFilterActive(projectFilter)
+      ? applyFilter(fetchedData?.projects ?? [], projectFilter, tasksByProjectId)
+      : (fetchedData?.projects ?? []),
+    [fetchedData?.projects, projectFilter, tasksByProjectId],
+  )
+
   if (!fetchedData || !mappingConfig) {
     return (
       <div className={styles.root}>
@@ -152,15 +208,6 @@ export function Step4Import() {
     })
   }
 
-  function toggleProject(projectId: string, checked: boolean) {
-    setSelectedProjectIds(prev => {
-      const next = new Set(prev)
-      if (checked) next.add(projectId)
-      else next.delete(projectId)
-      return next
-    })
-  }
-
   function makeResult(entity: string, totalRows: number, errors: ImportError[]): ImportResult {
     return {
       entity,
@@ -171,47 +218,61 @@ export function Step4Import() {
     }
   }
 
+  function handleStopClick() {
+    const concurrency = getConcurrencyLimit()
+    const confirmed = window.confirm(
+      `Stop migration after current projects complete?\n\n` +
+      `Up to ${concurrency} projects in progress will finish first. ` +
+      `Subsequent projects will be skipped. Partial results will be available in the report.`
+    )
+    if (!confirmed) return
+    stopRequestedRef.current = true
+    setStopButtonPressed(true)
+    requestStop()
+    appendLog('Stop requested — finishing current projects')
+  }
+
   async function runImport() {
     setRunning(true)
     setFatalError(null)
     setLogLines([])
     clearImportResults()
     clearSkippedFieldInstances()
+    clearStopRequest()
+    clearImportProgress()
+    stopRequestedRef.current = false
+    setStopButtonPressed(false)
 
     const isDataOnly = migrationMode === 'dataOnly'
+    const concurrency = getConcurrencyLimit()
 
-    const workTotal =
-      data.resources.length +
-      selectedProjects.length +
-      selectedTeamMembers.length +
-      selectedTasks.length +
-      (includeDependencies ? selectedDependencies.length : 0) +
-      selectedAssignments.length
-    setTotal(workTotal)
+    let totalOps = data.resources.length + selectedProjects.length + selectedTeamMembers.length
+    if (migrationScope.tasks) totalOps += selectedTasks.length
+    if (migrationScope.dependencies) totalOps += selectedDependencies.length
+    if (migrationScope.assignments) totalOps += selectedAssignments.length
+    setTotal(totalOps)
     setCompleted(0)
 
-    // ── Build resolvers (dataOnly mode only) ──
+    startImport(selectedProjects.length, concurrency)
+    appendLog(`Starting import — ${selectedProjects.length} projects, concurrency=${concurrency}`)
+
     let resolvers: Map<string, FieldResolver> | undefined
 
     if (isDataOnly) {
       if (!resolverPlan) {
-        setFatalError('Resolver plan is missing. Go back to Step 2 and save the mapping.')
+        setFatalError('Resolver plan missing. Go back to Step 2 and save the mapping.')
         setRunning(false)
         return
       }
-
       setPhase('Building resolvers')
-      appendLog('Building field resolvers from mapping plan…')
-
+      appendLog('Building field resolvers…')
       try {
         clearResolverCaches()
         const { resolvers: built, warnings } = await buildResolverMap(resolverPlan)
         resolvers = built
-
         for (const w of warnings) {
-          const level = w.severity === 'error' ? 'error' : 'warning'
           appendLog(`[Resolver ${w.severity.toUpperCase()}] ${w.field}: ${w.message}`)
-          addLog({ level, message: `Resolver build — ${w.field}: ${w.message}` })
+          addLog({ level: w.severity === 'error' ? 'error' : 'warning', message: `Resolver build — ${w.field}: ${w.message}` })
         }
         appendLog(`Resolvers ready: ${resolvers.size} field(s)`)
       } catch (e) {
@@ -222,80 +283,146 @@ export function Step4Import() {
     }
 
     try {
+      // Phase 1: Resources (sequential, before parallel project loop)
       setPhase('Resources')
       appendLog(`Matching/importing ${data.resources.length} resources`)
       const resourceResults = await writeResources(data.resources, r => {
         setCompleted(c => c + 1)
         appendLog(`${r.success ? 'OK' : 'SKIP'} resource ${r.poResourceUid}${r.error ? `: ${r.error.message}` : ''}`)
       })
+      const resourceIdMap = Object.fromEntries(
+        resourceResults.filter(r => r.success && r.dvBookableResourceId)
+          .map(r => [r.poResourceUid, r.dvBookableResourceId as string])
+      )
+
+      // Phase 2: Per-project parallel (project + team members + tasks + deps + assignments)
+      setPhase('Importing')
+      const allProjectResults: ProjectWriteResult[] = []
+      const allTeamResults: AssignmentWriteResult[] = []
+      const allTaskResults: TaskWriteResult[] = []
+      const allDepResults: DependencyWriteResult[] = []
+      const allAssignResults: AssignmentWriteResult[] = []
+      const allSkipped: SkippedFieldInstance[] = []
+
+      await runWithConcurrency(
+        selectedProjects,
+        async (project) => {
+          if (stopRequestedRef.current) {
+            appendLog(`[${project.ProjectName}] Skipped`)
+            return
+          }
+
+          const projectStart = Date.now()
+
+          const projectResults = await writeProjects([project], config, optionSetMappings, r => {
+            setCompleted(c => c + 1)
+            appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} project${r.error ? `: ${r.error.message}` : ''}${r.skippedFields?.length ? ` (${r.skippedFields.length} field(s) skipped)` : ''}`)
+          }, resolvers, projectOwnerMap)
+          allProjectResults.push(...projectResults)
+
+          if (isDataOnly) {
+            const skipped: SkippedFieldInstance[] = projectResults.flatMap(r =>
+              (r.skippedFields ?? []).map(sf => ({
+                poField: sf.poField,
+                dvField: sf.dvField,
+                reason: sf.reason,
+                originalValue: sf.originalValue,
+                partialResolution: sf.partialResolution,
+                sourceId: r.poProjectId,
+              }))
+            )
+            allSkipped.push(...skipped)
+          }
+
+          const dvProjectId = projectResults.find(r => r.poProjectId === project.ProjectId && r.success)?.dvProjectId
+          if (!dvProjectId) {
+            completeProject(Date.now() - projectStart)
+            return
+          }
+
+          const singleProjectMap = { [project.ProjectId]: dvProjectId }
+
+          const projectTeamMembers = selectedTeamMembers.filter(tm => tm.ProjectId === project.ProjectId)
+          const teamResults = await writeTeamMembers(projectTeamMembers, singleProjectMap, resourceIdMap, r => {
+            setCompleted(c => c + 1)
+            appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} team member ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
+          })
+          allTeamResults.push(...teamResults)
+          const projectTeamMemberIdMap = Object.fromEntries(
+            teamResults.filter(r => r.success && r.dvAssignmentId)
+              .map(r => [r.poAssignmentId, r.dvAssignmentId as string])
+          )
+
+          if (migrationScope.tasks) {
+            const projectTasks = selectedTasks.filter(t => t.ProjectId === project.ProjectId)
+            const taskResults = await writeTasks(projectTasks, singleProjectMap, config, optionSetMappings, r => {
+              setCompleted(c => c + 1)
+              appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} task ${r.poTaskId}${r.error ? `: ${r.error.message}` : ''}`)
+            })
+            allTaskResults.push(...taskResults)
+            const projectTaskIdMap = Object.fromEntries(
+              taskResults.filter(r => r.success && r.dvTaskId)
+                .map(r => [r.poTaskId, r.dvTaskId as string])
+            )
+
+            if (migrationScope.dependencies) {
+              const projectDeps = selectedDependencies.filter(d => d.ProjectId === project.ProjectId)
+              if (projectDeps.length > 0) {
+                const depResults = await writeDependencies(projectDeps, singleProjectMap, projectTaskIdMap, r => {
+                  setCompleted(c => c + 1)
+                  appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} dependency ${r.poDependencyId}${r.error ? `: ${r.error.message}` : ''}`)
+                })
+                allDepResults.push(...depResults)
+              }
+            }
+
+            if (migrationScope.assignments) {
+              const projectAssignments = selectedAssignments.filter(a => a.ProjectId === project.ProjectId)
+              if (projectAssignments.length > 0) {
+                const assignResults = await writeAssignments(
+                  projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, r => {
+                    setCompleted(c => c + 1)
+                    appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} assignment ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
+                  }
+                )
+                allAssignResults.push(...assignResults)
+              }
+            }
+          }
+
+          completeProject(Date.now() - projectStart)
+          appendLog(`[${project.ProjectName}] Complete`)
+        },
+        concurrency,
+      )
+
+      // Aggregate results for Step 5 report
       addImportResult(makeResult('Resources', resourceResults.length, resourceResults.flatMap(r => r.error ? [r.error] : [])))
-      const resourceIdMap = Object.fromEntries(resourceResults.filter(r => r.success && r.dvBookableResourceId).map(r => [r.poResourceUid, r.dvBookableResourceId as string]))
-
-      setPhase('Projects')
-      appendLog(`Importing ${selectedProjects.length} projects`)
-      const projectResults = await writeProjects(selectedProjects, config, optionSetMappings, r => {
-        setCompleted(c => c + 1)
-        appendLog(`${r.success ? 'OK' : 'ERR'} project ${r.poProjectId}${r.error ? `: ${r.error.message}` : ''}${r.skippedFields?.length ? ` (${r.skippedFields.length} field(s) skipped)` : ''}`)
-      }, resolvers, projectOwnerMap)
-      addImportResult(makeResult('Projects', projectResults.length, projectResults.flatMap(r => r.error ? [r.error] : [])))
-      const projectIdMap = Object.fromEntries(projectResults.filter(r => r.success && r.dvProjectId).map(r => [r.poProjectId, r.dvProjectId as string]))
-
-      // Collect skipped field instances (dataOnly only)
-      if (isDataOnly) {
-        const skipped: SkippedFieldInstance[] = projectResults.flatMap(r =>
-          (r.skippedFields ?? []).map(sf => ({
-            poField: sf.poField,
-            dvField: sf.dvField,
-            reason: sf.reason,
-            originalValue: sf.originalValue,
-            partialResolution: sf.partialResolution,
-            sourceId: r.poProjectId,
-          })),
-        )
-        if (skipped.length > 0) {
-          addSkippedFieldInstances(skipped)
-          appendLog(`${skipped.length} skipped field value(s) — see Step 5 Skipped Fields for details`)
+      addImportResult(makeResult('Projects', allProjectResults.length, allProjectResults.flatMap(r => r.error ? [r.error] : [])))
+      addImportResult(makeResult('Team members', allTeamResults.length, allTeamResults.flatMap(r => r.error ? [r.error] : [])))
+      if (migrationScope.tasks) {
+        addImportResult(makeResult('Tasks', allTaskResults.length, allTaskResults.flatMap(r => r.error ? [r.error] : [])))
+        if (migrationScope.dependencies && allDepResults.length > 0) {
+          addImportResult(makeResult('Dependencies', allDepResults.length, allDepResults.flatMap(r => r.error ? [r.error] : [])))
+        }
+        if (migrationScope.assignments && allAssignResults.length > 0) {
+          addImportResult(makeResult('Assignments', allAssignResults.length, allAssignResults.flatMap(r => r.error ? [r.error] : [])))
         }
       }
 
-      setPhase('Team members')
-      appendLog(`Importing ${selectedTeamMembers.length} project team members`)
-      const teamResults = await writeTeamMembers(selectedTeamMembers, projectIdMap, resourceIdMap, r => {
-        setCompleted(c => c + 1)
-        appendLog(`${r.success ? 'OK' : 'SKIP'} team member ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
-      })
-      addImportResult(makeResult('Team members', teamResults.length, teamResults.flatMap(r => r.error ? [r.error] : [])))
-      const teamMemberIdMap = Object.fromEntries(teamResults.filter(r => r.success && r.dvAssignmentId).map(r => [r.poAssignmentId, r.dvAssignmentId as string]))
-
-      setPhase('Tasks')
-      appendLog(`Importing ${selectedTasks.length} tasks through Project schedule OperationSets`)
-      const taskResults = await writeTasks(selectedTasks, projectIdMap, config, optionSetMappings, r => {
-        setCompleted(c => c + 1)
-        appendLog(`${r.success ? 'OK' : 'ERR'} task ${r.poTaskId}${r.error ? `: ${r.error.message}` : ''}`)
-      })
-      addImportResult(makeResult('Tasks', taskResults.length, taskResults.flatMap(r => r.error ? [r.error] : [])))
-      const taskIdMap = Object.fromEntries(taskResults.filter(r => r.success && r.dvTaskId).map(r => [r.poTaskId, r.dvTaskId as string]))
-
-      if (includeDependencies && selectedDependencies.length > 0) {
-        setPhase('Dependencies')
-        appendLog(`Importing ${selectedDependencies.length} dependencies through Project schedule OperationSets`)
-        const dependencyResults = await writeDependencies(selectedDependencies, projectIdMap, taskIdMap, r => {
-          setCompleted(c => c + 1)
-          appendLog(`${r.success ? 'OK' : 'SKIP'} dependency ${r.poDependencyId}${r.error ? `: ${r.error.message}` : ''}`)
-        })
-        addImportResult(makeResult('Dependencies', dependencyResults.length, dependencyResults.flatMap(r => r.error ? [r.error] : [])))
+      if (isDataOnly && allSkipped.length > 0) {
+        addSkippedFieldInstances(allSkipped)
+        appendLog(`${allSkipped.length} field value(s) skipped — see Step 5 Skipped Fields for details`)
       }
 
-      setPhase('Assignments')
-      appendLog(`Importing ${selectedAssignments.length} assignments through Project schedule OperationSets`)
-      const assignmentResults = await writeAssignments(selectedAssignments, projectIdMap, taskIdMap, teamMemberIdMap, r => {
-        setCompleted(c => c + 1)
-        appendLog(`${r.success ? 'OK' : 'SKIP'} assignment ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
-      })
-      addImportResult(makeResult('Assignments', assignmentResults.length, assignmentResults.flatMap(r => r.error ? [r.error] : [])))
-
-      setPhase('Done')
-      appendLog('Import completed')
+      if (stopRequestedRef.current) {
+        setImportWasStopped(true)
+        setPhase('Stopped')
+        appendLog('Import stopped — some projects were skipped')
+      } else {
+        setPhase('Done')
+        appendLog('Import completed')
+      }
     } catch (e) {
       setPhase('Failed')
       setFatalError(String(e))
@@ -305,12 +432,15 @@ export function Step4Import() {
     }
   }
 
+  const progressPct = total > 0 ? completed / total : 0
+  const canProceed = phase === 'Done' || phase === 'Stopped'
+
   return (
     <div className={styles.root}>
       <div>
-        <div className={styles.title}>Step 4 - Import Data</div>
+        <div className={styles.title}>Step 4 — Import Data</div>
         <div className={styles.subtitle}>
-          Select projects, then import resources, projects, team members, summary tasks, tasks, and assignments.
+          Select projects, then import resources, projects, team members, tasks, and assignments.
         </div>
       </div>
 
@@ -333,24 +463,30 @@ export function Step4Import() {
         onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
       />
 
-      <Checkbox
-        checked={includeDependencies}
-        disabled={running || selectedDependencies.length === 0}
-        label={`Import dependencies${selectedDependencies.length > 0 ? ` (${selectedDependencies.length})` : ' (none found)'}`}
-        onChange={(_, d) => setIncludeDependencies(!!d.checked)}
+      <div style={{ fontSize: '13px', color: tokens.colorNeutralForeground3 }}>
+        Scope: Projects ✓
+        {migrationScope.tasks ? ' · Tasks ✓' : ' · Tasks ✗'}
+        {migrationScope.dependencies ? ' · Dependencies ✓' : ' · Dependencies ✗'}
+        {migrationScope.assignments ? ' · Assignments ✓' : ' · Assignments ✗'}
+        {migrationScope.resources ? ' · Resources ✓' : ' · Resources ✗'}
+      </div>
+
+      <FilterBar
+        ownerNames={ownerNames}
+        tasksAvailable={migrationScope.tasks}
       />
 
-      <div className={styles.toolbar}>
-        <Button size="small" disabled={running} onClick={() => setSelectedProjectIds(new Set(data.projects.map(p => p.ProjectId)))}>
-          Select all
-        </Button>
-        <Button size="small" disabled={running} onClick={() => setSelectedProjectIds(new Set())}>
-          Select none
-        </Button>
-        <span className={styles.muted}>
-          {selectedProjects.length} projects selected · {selectedTasks.length} tasks · {selectedAssignments.length} assignments
-        </span>
-      </div>
+      <BulkActions
+        allProjectIds={data.projects.map(p => p.ProjectId)}
+        displayedProjectIds={filteredProjects.map(p => p.ProjectId)}
+        disabled={running}
+      />
+      <span className={styles.muted} style={{ fontSize: '13px' }}>
+        {selectedProjects.length} of {data.projects.length} projects selected
+        {isFilterActive(projectFilter) ? ` · showing ${filteredProjects.length} filtered` : ''}
+        {migrationScope.tasks ? ` · ${selectedTasks.length} tasks` : ''}
+        {migrationScope.assignments ? ` · ${selectedAssignments.length} assignments` : ''}
+      </span>
 
       <div className={styles.panel}>
         <table className={styles.table}>
@@ -364,13 +500,13 @@ export function Step4Import() {
             </tr>
           </thead>
           <tbody>
-            {data.projects.map(project => (
+            {filteredProjects.map(project => (
               <tr key={project.ProjectId}>
                 <td className={styles.td}>
                   <Checkbox
                     checked={selectedProjectIds.has(project.ProjectId)}
                     disabled={running}
-                    onChange={(_, d) => toggleProject(project.ProjectId, !!d.checked)}
+                    onChange={() => toggleProjectSelection(project.ProjectId)}
                   />
                 </td>
                 <td className={styles.td}>{project.ProjectName}</td>
@@ -396,12 +532,36 @@ export function Step4Import() {
       </div>
 
       <div className={styles.panel}>
-        <div className={styles.toolbar}>
-          {running && <Spinner size="tiny" />}
-          <strong>{phase}</strong>
-          <span className={styles.muted}>{completed} / {total}</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className={styles.toolbar}>
+            {running && <Spinner size="tiny" />}
+            <strong>{phase}</strong>
+            <span className={styles.muted}>{completed} / {total}</span>
+          </div>
+          {running && (
+            <Button
+              size="small"
+              disabled={stopButtonPressed}
+              onClick={handleStopClick}
+              style={{ background: tokens.colorPaletteRedBackground3, color: tokens.colorNeutralForegroundOnBrand }}
+            >
+              {stopButtonPressed ? 'Stopping…' : 'Stop Migration'}
+            </Button>
+          )}
         </div>
-        <ProgressBar value={total > 0 ? completed / total : 0} />
+
+        {importProgress && (
+          <div className={styles.progressRow}>
+            <span>Projects: {importProgress.projectsCompleted} / {importProgress.projectsTotal}</span>
+            <span>Elapsed: {formatDuration(elapsed)}</span>
+            <span>
+              ETA: {importProgress.etaMs != null ? `~${formatDuration(importProgress.etaMs)}` : 'Calculating…'}
+            </span>
+          </div>
+        )}
+
+        <ProgressBar value={progressPct} />
+
         {logLines.length > 0 && (
           <div className={styles.log} ref={logRef}>
             {logLines.map((line, idx) => <div key={idx}>{line}</div>)}
@@ -412,12 +572,28 @@ export function Step4Import() {
       <div className={styles.footer}>
         <Button onClick={prevStep} disabled={running}>Back</Button>
         <div className={styles.toolbar}>
-          <Button appearance="primary" onClick={runImport} disabled={running || selectedProjects.length === 0 || !confirmScheduleRebuild}>
-            {running ? 'Importing...' : 'Start Import'}
+          <Button
+            appearance="primary"
+            onClick={runImport}
+            disabled={running || selectedProjects.length === 0 || !confirmScheduleRebuild}
+          >
+            {running ? 'Importing…' : 'Start Import'}
           </Button>
-          <Button onClick={nextStep} disabled={running || phase !== 'Done'}>Next: Validation Report</Button>
+          <Button onClick={nextStep} disabled={running || !canProceed}>
+            Next: Validation Report
+          </Button>
         </div>
       </div>
     </div>
   )
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000)
+  const h = Math.floor(totalSeconds / 3600)
+  const m = Math.floor((totalSeconds % 3600) / 60)
+  const s = totalSeconds % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${s}s`
+  return `${s}s`
 }

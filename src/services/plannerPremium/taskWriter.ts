@@ -6,7 +6,7 @@ import { chunks, cleanGuid, getRecordId, nowError, sourceGuidOrNew } from './imp
 import { createOperationSet, executeOperationSet, queueScheduleCreate, queueScheduleDelete } from './scheduleApi'
 
 const TASK_MATERIALIZATION_MAX_ATTEMPTS = 5
-const TASK_MATERIALIZATION_DELAY_MS = 5000
+const TASK_MATERIALIZATION_DELAY_MS = 20000
 
 export interface TaskWriteResult {
   poTaskId: string

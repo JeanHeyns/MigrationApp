@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Button,
+  Checkbox,
   Field,
   Input,
   Radio,
@@ -16,6 +17,7 @@ import {
 } from '@fluentui/react-components'
 import { ArrowUploadRegular, ArrowDownloadRegular } from '@fluentui/react-icons'
 import { useMigration } from '../../app/MigrationContext'
+import type { MigrationScope } from '../../app/MigrationContext'
 import { fetchProjects, isMigratableProject } from '../../services/projectOnline/projects'
 import { fetchTasks } from '../../services/projectOnline/tasks'
 import { fetchDependencies } from '../../services/projectOnline/dependencies'
@@ -226,6 +228,12 @@ const useStyles = makeStyles({
   bannerAction: {
     marginLeft: '8px',
   },
+  scopeIndented: {
+    paddingLeft: '24px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
 })
 
 type FetchItemStatus = 'pending' | 'fetching' | 'done' | 'error'
@@ -281,6 +289,7 @@ export function Step1Connect() {
     selectedSolution, setSelectedSolution, setFetchedData, nextStep,
     migrationMode, setMigrationMode, schemaSnapshot, setSchemaSnapshot,
     fetchedData, setResolverPlan,
+    migrationScope, setMigrationScope,
   } = useMigration()
 
   // ── Project Online state ─────────────────────────────────────────────────
@@ -341,10 +350,16 @@ export function Step1Connect() {
     type FetchStep = { key: keyof PoFetchedData; fn: () => Promise<unknown[]> }
     const fullSteps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
-      { key: 'tasks',        fn: () => fetchTasks(url) },
-      { key: 'dependencies', fn: () => fetchDependencies(url, data.projects) },
-      { key: 'resources',    fn: () => fetchResources(url) },
-      { key: 'assignments',  fn: () => fetchAssignments(url) },
+      ...(migrationScope.tasks ? [
+        { key: 'tasks' as const,        fn: () => fetchTasks(url) },
+        { key: 'dependencies' as const, fn: () => fetchDependencies(url, data.projects) },
+      ] : []),
+      ...(migrationScope.resources ? [
+        { key: 'resources' as const, fn: () => fetchResources(url) },
+      ] : []),
+      ...(migrationScope.assignments ? [
+        { key: 'assignments' as const, fn: () => fetchAssignments(url) },
+      ] : []),
       { key: 'teamMembers',  fn: () => fetchTeamMembers(url) },
       { key: 'customFields', fn: () => fetchCustomFields(url) },
       { key: 'lookupTables', fn: () => fetchLookupTables(url) },
@@ -411,7 +426,7 @@ export function Step1Connect() {
     setSchemaSnapshot(null)
     setResolverPlan(null)
     setPhase('fetching')
-    setItems(migrationMode === 'schemaOnly' ? SCHEMA_ONLY_ITEMS : INITIAL_ITEMS)
+    setItems(buildFetchItems(migrationMode, migrationScope))
     setPwaUrl(url)
 
     const fetched = await fetchProjectOnlineData(url)
@@ -622,6 +637,42 @@ export function Step1Connect() {
           />
         </RadioGroup>
       </div>
+
+      {/* ── Migration scope ── */}
+      {migrationMode !== 'schemaOnly' && (
+        <div className={styles.sectionBox}>
+          <div className={styles.sectionTitle}>Migration scope</div>
+          <div style={{ fontSize: '13px', color: tokens.colorNeutralForeground3 }}>
+            ✓ Projects (always included)
+          </div>
+          <Checkbox
+            checked={migrationScope.tasks}
+            disabled={isFetching}
+            label="Tasks"
+            onChange={(_, d) => setMigrationScope({ tasks: !!d.checked })}
+          />
+          <div className={styles.scopeIndented}>
+            <Checkbox
+              checked={migrationScope.dependencies}
+              disabled={isFetching || !migrationScope.tasks}
+              label="Dependencies"
+              onChange={(_, d) => setMigrationScope({ dependencies: !!d.checked })}
+            />
+            <Checkbox
+              checked={migrationScope.assignments}
+              disabled={isFetching || !migrationScope.tasks}
+              label="Assignments"
+              onChange={(_, d) => setMigrationScope({ assignments: !!d.checked })}
+            />
+          </div>
+          <Checkbox
+            checked={migrationScope.resources}
+            disabled={isFetching || migrationScope.assignments}
+            label="Resources"
+            onChange={(_, d) => setMigrationScope({ resources: !!d.checked })}
+          />
+        </div>
+      )}
 
       {/* ── Source selector ── */}
       <div className={styles.sectionBox}>
@@ -889,6 +940,27 @@ export function Step1Connect() {
       )}
     </div>
   )
+}
+
+function buildFetchItems(mode: MigrationMode, scope: MigrationScope): FetchItem[] {
+  if (mode === 'schemaOnly') return [...SCHEMA_ONLY_ITEMS]
+  const items: FetchItem[] = [
+    { key: 'projects', label: 'Projects', status: 'pending', count: 0 },
+  ]
+  if (scope.tasks) {
+    items.push({ key: 'tasks', label: 'Tasks', status: 'pending', count: 0 })
+    items.push({ key: 'dependencies', label: 'Dependencies', status: 'pending', count: 0 })
+  }
+  if (scope.resources) {
+    items.push({ key: 'resources', label: 'Resources', status: 'pending', count: 0 })
+  }
+  if (scope.assignments) {
+    items.push({ key: 'assignments', label: 'Assignments', status: 'pending', count: 0 })
+  }
+  items.push({ key: 'teamMembers', label: 'Team Members', status: 'pending', count: 0 })
+  items.push({ key: 'customFields', label: 'Custom Fields', status: 'pending', count: 0 })
+  items.push({ key: 'lookupTables', label: 'Lookup Tables', status: 'pending', count: 0 })
+  return items
 }
 
 function pruneNonMigratableProjects(data: PoFetchedData): PoFetchedData {

@@ -5,8 +5,70 @@ import type { DvSolution, ImportResult, LogEntry } from '../models/plannerPremiu
 import type { MigrationMode, SchemaCreationResults, SchemaSnapshot, ResolverPlan, SkippedFieldInstance } from '../models/dataOnly.types'
 import { clearDataverseOrgUrl, setDataverseOrgUrl } from '../config/environment'
 
+export interface ProjectFilter {
+  searchTerm: string
+  startDateFrom: string | null
+  startDateTo: string | null
+  finishDateFrom: string | null
+  finishDateTo: string | null
+  ownerNames: string[]
+  taskCountMin: number | null
+  taskCountMax: number | null
+}
+
+function emptyFilter(): ProjectFilter {
+  return {
+    searchTerm: '',
+    startDateFrom: null,
+    startDateTo: null,
+    finishDateFrom: null,
+    finishDateTo: null,
+    ownerNames: [],
+    taskCountMin: null,
+    taskCountMax: null,
+  }
+}
+
+export function isFilterActive(filter: ProjectFilter): boolean {
+  return (
+    filter.searchTerm !== '' ||
+    filter.startDateFrom !== null ||
+    filter.startDateTo !== null ||
+    filter.finishDateFrom !== null ||
+    filter.finishDateTo !== null ||
+    filter.ownerNames.length > 0 ||
+    filter.taskCountMin !== null ||
+    filter.taskCountMax !== null
+  )
+}
+
 export type DataSource = 'ProjectOnline' | 'FileUpload'
 export type DataverseUrlSource = 'loading' | 'localStorage' | 'environmentVariable' | 'manualInput' | 'error'
+
+export interface MigrationScope {
+  projects: true
+  tasks: boolean
+  dependencies: boolean
+  assignments: boolean
+  resources: boolean
+}
+
+export interface ImportProgress {
+  startedAt: Date
+  projectsCompleted: number
+  projectsTotal: number
+  concurrency: number
+  recentProjectDurations: number[]
+  etaMs: number | null
+}
+
+const DEFAULT_MIGRATION_SCOPE: MigrationScope = {
+  projects: true,
+  tasks: true,
+  dependencies: true,
+  assignments: true,
+  resources: true,
+}
 
 interface MigrationState {
   currentStep: number
@@ -18,6 +80,8 @@ interface MigrationState {
   selectedSolution: DvSolution | null
   skipColumnCreation: boolean
   fetchedData: PoFetchedData | null
+  selectedProjectIds: Set<string>
+  projectFilter: ProjectFilter
   mappingConfig: MappingConfiguration | null
   optionSetMappings: OptionSetMapping[]
   importResults: ImportResult[]
@@ -27,6 +91,10 @@ interface MigrationState {
   resolverPlan: ResolverPlan | null
   skippedFieldInstances: SkippedFieldInstance[]
   schemaCreationResults: SchemaCreationResults | null
+  migrationScope: MigrationScope
+  importProgress: ImportProgress | null
+  stopRequested: boolean
+  importWasStopped: boolean
 }
 
 interface MigrationActions {
@@ -41,6 +109,12 @@ interface MigrationActions {
   setSelectedSolution: (solution: DvSolution | null) => void
   setSkipColumnCreation: (skip: boolean) => void
   setFetchedData: (data: PoFetchedData) => void
+  setSelectedProjectIds: (ids: Set<string>) => void
+  toggleProjectSelection: (id: string) => void
+  selectProjectsByIds: (ids: string[]) => void
+  deselectProjectsByIds: (ids: string[]) => void
+  setProjectFilter: (filter: ProjectFilter) => void
+  clearProjectFilter: () => void
   setMappingConfig: (config: MappingConfiguration) => void
   setOptionSetMappings: (mappings: OptionSetMapping[]) => void
   addImportResult: (result: ImportResult) => void
@@ -54,6 +128,13 @@ interface MigrationActions {
   clearSkippedFieldInstances: () => void
   setSchemaCreationResults: (results: SchemaCreationResults | null) => void
   resetState: () => void
+  setMigrationScope: (partial: Partial<Omit<MigrationScope, 'projects'>>) => void
+  startImport: (totalProjects: number, concurrency: number) => void
+  completeProject: (durationMs: number) => void
+  clearImportProgress: () => void
+  requestStop: () => void
+  clearStopRequest: () => void
+  setImportWasStopped: (value: boolean) => void
 }
 
 type MigrationContextType = MigrationState & MigrationActions
@@ -69,7 +150,9 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [dataSource, setDataSource] = useState<DataSource>('ProjectOnline')
   const [selectedSolution, setSelectedSolution] = useState<DvSolution | null>(null)
   const [skipColumnCreation, setSkipColumnCreation] = useState(false)
-  const [fetchedData, setFetchedData] = useState<PoFetchedData | null>(null)
+  const [fetchedData, setFetchedDataState] = useState<PoFetchedData | null>(null)
+  const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set())
+  const [projectFilter, setProjectFilterState] = useState<ProjectFilter>(emptyFilter())
   const [mappingConfig, setMappingConfig] = useState<MappingConfiguration | null>(null)
   const [optionSetMappings, setOptionSetMappings] = useState<OptionSetMapping[]>([])
   const [importResults, setImportResults] = useState<ImportResult[]>([])
@@ -79,6 +162,10 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [resolverPlan, setResolverPlan] = useState<ResolverPlan | null>(null)
   const [skippedFieldInstances, setSkippedFieldInstances] = useState<SkippedFieldInstance[]>([])
   const [schemaCreationResults, setSchemaCreationResults] = useState<SchemaCreationResults | null>(null)
+  const [migrationScope, setMigrationScopeState] = useState<MigrationScope>(DEFAULT_MIGRATION_SCOPE)
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
+  const [stopRequested, setStopRequested] = useState(false)
+  const [importWasStopped, setImportWasStopped] = useState(false)
 
   const setMigrationMode = useCallback((mode: MigrationMode) => {
     setMigrationModeState(mode)
@@ -133,13 +220,95 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
 
   const clearSkippedFieldInstances = useCallback(() => setSkippedFieldInstances([]), [])
 
+  const setMigrationScope = useCallback((partial: Partial<Omit<MigrationScope, 'projects'>>) => {
+    setMigrationScopeState(prev => {
+      let tasks = partial.tasks ?? prev.tasks
+      let dependencies = partial.dependencies ?? prev.dependencies
+      let assignments = partial.assignments ?? prev.assignments
+      let resources = partial.resources ?? prev.resources
+      // tasks: false → force deps + assignments off
+      if (!tasks) { dependencies = false; assignments = false }
+      // deps: true → force tasks on
+      if (dependencies) tasks = true
+      // assignments: true → force resources on
+      if (assignments) resources = true
+      return { projects: true, tasks, dependencies, assignments, resources }
+    })
+  }, [])
+
+  const startImport = useCallback((totalProjects: number, concurrency: number) => {
+    setImportProgress({
+      startedAt: new Date(),
+      projectsCompleted: 0,
+      projectsTotal: totalProjects,
+      concurrency,
+      recentProjectDurations: [],
+      etaMs: null,
+    })
+  }, [])
+
+  const completeProject = useCallback((durationMs: number) => {
+    setImportProgress(prev => {
+      if (!prev) return prev
+      const projectsCompleted = prev.projectsCompleted + 1
+      const recentProjectDurations = [...prev.recentProjectDurations.slice(-4), durationMs]
+      let etaMs: number | null = null
+      if (recentProjectDurations.length >= 3) {
+        const avgMs = recentProjectDurations.reduce((a, b) => a + b, 0) / recentProjectDurations.length
+        const remaining = prev.projectsTotal - projectsCompleted
+        etaMs = Math.round(Math.ceil(remaining / prev.concurrency) * avgMs)
+      }
+      return { ...prev, projectsCompleted, recentProjectDurations, etaMs }
+    })
+  }, [])
+
+  const setFetchedData = useCallback((data: PoFetchedData) => {
+    setFetchedDataState(data)
+    setSelectedProjectIds(new Set(data.projects.map(p => p.ProjectId)))
+    setProjectFilterState(emptyFilter())
+  }, [])
+
+  const toggleProjectSelection = useCallback((id: string) => {
+    setSelectedProjectIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const selectProjectsByIds = useCallback((ids: string[]) => {
+    setSelectedProjectIds(prev => {
+      const next = new Set(prev)
+      for (const id of ids) next.add(id)
+      return next
+    })
+  }, [])
+
+  const deselectProjectsByIds = useCallback((ids: string[]) => {
+    setSelectedProjectIds(prev => {
+      const next = new Set(prev)
+      for (const id of ids) next.delete(id)
+      return next
+    })
+  }, [])
+
+  const setProjectFilter = useCallback((filter: ProjectFilter) => setProjectFilterState(filter), [])
+  const clearProjectFilter = useCallback(() => setProjectFilterState(emptyFilter()), [])
+
+  const clearImportProgress = useCallback(() => setImportProgress(null), [])
+  const requestStop = useCallback(() => setStopRequested(true), [])
+  const clearStopRequest = useCallback(() => setStopRequested(false), [])
+
   const resetState = useCallback(() => {
     setCurrentStep(1)
     setPwaUrl('')
     setDataSource('ProjectOnline')
     setSelectedSolution(null)
     setSkipColumnCreation(false)
-    setFetchedData(null)
+    setFetchedDataState(null)
+    setSelectedProjectIds(new Set())
+    setProjectFilterState(emptyFilter())
     setMappingConfig(null)
     setOptionSetMappings([])
     setImportResults([])
@@ -149,6 +318,10 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setResolverPlan(null)
     setSkippedFieldInstances([])
     setSchemaCreationResults(null)
+    setMigrationScopeState(DEFAULT_MIGRATION_SCOPE)
+    setImportProgress(null)
+    setStopRequested(false)
+    setImportWasStopped(false)
     try { localStorage.removeItem('DEBUG_DATAONLY_WRITER') } catch { /* ignore */ }
   }, [])
 
@@ -156,17 +329,24 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     <MigrationContext.Provider value={{
       currentStep, pwaUrl, dataverseOrgUrl, dataverseUrlSource, dataverseUrlError,
       dataSource, selectedSolution, skipColumnCreation,
-      fetchedData, mappingConfig, optionSetMappings, importResults, logs,
+      fetchedData, selectedProjectIds, projectFilter,
+      mappingConfig, optionSetMappings, importResults, logs,
       migrationMode, schemaSnapshot, resolverPlan, schemaCreationResults,
+      migrationScope, importProgress, stopRequested, importWasStopped,
       setCurrentStep, nextStep, prevStep, setPwaUrl,
       setResolvedDataverseUrl, setDataverseUrlError, clearResolvedDataverseUrl,
       setDataSource,
       setSelectedSolution, setSkipColumnCreation,
-      setFetchedData, setMappingConfig, setOptionSetMappings,
+      setFetchedData, setSelectedProjectIds, toggleProjectSelection,
+      selectProjectsByIds, deselectProjectsByIds,
+      setProjectFilter, clearProjectFilter,
+      setMappingConfig, setOptionSetMappings,
       addImportResult, clearImportResults, addLog, clearLogs,
       setMigrationMode, setSchemaSnapshot, setResolverPlan,
       skippedFieldInstances, addSkippedFieldInstances, clearSkippedFieldInstances,
       setSchemaCreationResults, resetState,
+      setMigrationScope, startImport, completeProject, clearImportProgress,
+      requestStop, clearStopRequest, setImportWasStopped,
     }}>
       {children}
     </MigrationContext.Provider>

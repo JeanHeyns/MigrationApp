@@ -1,4 +1,5 @@
 import { makeStyles, tokens } from '@fluentui/react-components'
+import { useMigration } from '../app/MigrationContext'
 
 const STEPS = [
   { n: 1, label: 'Connect & Read' },
@@ -52,6 +53,16 @@ const useStyles = makeStyles({
     minWidth: '12px',
     transition: 'background 0.2s',
   },
+  badge: {
+    marginLeft: 'auto',
+    flexShrink: 0,
+    fontSize: '12px',
+    color: tokens.colorNeutralForeground3,
+    background: tokens.colorNeutralBackground4,
+    borderRadius: tokens.borderRadiusMedium,
+    padding: '2px 10px',
+    whiteSpace: 'nowrap',
+  },
 })
 
 interface StepIndicatorProps {
@@ -60,6 +71,9 @@ interface StepIndicatorProps {
 
 export function StepIndicator({ currentStep }: StepIndicatorProps) {
   const styles = useStyles()
+  const { selectedProjectIds, fetchedData } = useMigration()
+  const totalProjects = fetchedData?.projects.length ?? 0
+  const showBadge = currentStep >= 2 && totalProjects > 0
 
   return (
     <div className={styles.root}>
@@ -88,6 +102,11 @@ export function StepIndicator({ currentStep }: StepIndicatorProps) {
           </div>
         )
       })}
+      {showBadge && (
+        <span className={styles.badge}>
+          {selectedProjectIds.size} / {totalProjects} projects
+        </span>
+      )}
     </div>
   )
 }

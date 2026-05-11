@@ -153,6 +153,7 @@ export function Step5Report() {
     importResults, prevStep,
     migrationMode, skippedFieldInstances, selectedSolution,
     schemaCreationResults, resetState,
+    selectedProjectIds, fetchedData,
   } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
@@ -280,8 +281,19 @@ export function Step5Report() {
       {showImportReport && (
       <>
       <div className={styles.summaryGrid}>
+        {fetchedData && (
+          <div className={styles.metric}>
+            <div className={styles.metricLabel}>Projects migrated</div>
+            <div className={styles.metricValue}>
+              {selectedProjectIds.size}
+              <span style={{ fontSize: '14px', fontWeight: 'normal', color: tokens.colorNeutralForeground3 }}>
+                {' '}/ {fetchedData.projects.length}
+              </span>
+            </div>
+          </div>
+        )}
         <div className={styles.metric}>
-          <div className={styles.metricLabel}>Total processed</div>
+          <div className={styles.metricLabel}>Records processed</div>
           <div className={styles.metricValue}>{totalRecords}</div>
         </div>
         <div className={styles.metric}>
