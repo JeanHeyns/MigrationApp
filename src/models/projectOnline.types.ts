@@ -34,6 +34,7 @@ export interface PoTask {
   TaskStartDate?: string
   TaskFinishDate?: string
   TaskDurationInMinutes?: number
+  TaskWork?: number | string
   TaskPercentCompleted?: number
   TaskOutlineLevel?: number
   TaskOutlineNumber?: string

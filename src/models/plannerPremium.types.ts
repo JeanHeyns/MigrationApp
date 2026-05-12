@@ -13,7 +13,8 @@ export interface DvTask {
   msdyn_scheduledstart?: string
   msdyn_scheduledend?: string
   msdyn_duration?: number
-  msdyn_percentcomplete?: number
+  msdyn_effort?: number
+  msdyn_progress?: number
   msdyn_outlinelevel?: number
   msdyn_ismilestone?: boolean
   [key: string]: unknown

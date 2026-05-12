@@ -7,6 +7,7 @@ import { createOperationSet, executeOperationSet, queueScheduleCreate, queueSche
 
 const TASK_MATERIALIZATION_MAX_ATTEMPTS = 5
 const TASK_MATERIALIZATION_DELAY_MS = 20000
+const DEFAULT_TASK_NAME = 'No Task Name'
 
 export interface TaskWriteResult {
   poTaskId: string
@@ -134,10 +135,10 @@ async function remapMaterializedTaskIds(
       const id = cleanGuid(getRecordId(row, 'msdyn_projecttaskid'))
       return !!id &&
         !usedIds.has(id) &&
-        String(row.msdyn_subject ?? '') === task.TaskName &&
+        String(row.msdyn_subject ?? '') === getTaskSubject(task) &&
         sameDate(row.msdyn_scheduledstart, task.TaskStartDate) &&
         sameDate(row.msdyn_scheduledend, task.TaskFinishDate) &&
-        sameDuration(row.msdyn_duration, task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes)
+        sameDuration(row.msdyn_duration, getTaskDuration(task))
     })
 
     const materializedId = cleanGuid(getRecordId(match ?? {}, 'msdyn_projecttaskid'))
@@ -204,7 +205,37 @@ function groupByProject(tasks: PoTask[]): Map<string, PoTask[]> {
 function compareTasks(a: PoTask, b: PoTask) {
   const ao = a.TaskOutlineNumber ?? ''
   const bo = b.TaskOutlineNumber ?? ''
-  return ao.localeCompare(bo, undefined, { numeric: true }) || a.TaskName.localeCompare(b.TaskName)
+  return ao.localeCompare(bo, undefined, { numeric: true }) || getTaskSubject(a).localeCompare(getTaskSubject(b))
+}
+
+function getTaskSubject(task: PoTask): string {
+  const name = String(task.TaskName ?? '').trim()
+  return name || DEFAULT_TASK_NAME
+}
+
+function getTaskDuration(task: PoTask): number | undefined {
+  return task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes
+}
+
+function getTaskEffort(task: PoTask): number | undefined {
+  return task.TaskIsMilestone ? 0 : toMinutes(task.TaskWork)
+}
+
+function toMinutes(value: unknown): number | undefined {
+  if (value == null || value === '') return undefined
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+
+  const text = String(value).trim()
+  const iso = /^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/i.exec(text)
+  if (iso) {
+    const hours = Number(iso[1] ?? 0)
+    const minutes = Number(iso[2] ?? 0)
+    const seconds = Number(iso[3] ?? 0)
+    return Math.round(hours * 60 + minutes + seconds / 60)
+  }
+
+  const numeric = Number(text)
+  return Number.isFinite(numeric) ? numeric : undefined
 }
 
 async function findDefaultBucket(projectId: string): Promise<string | undefined> {
@@ -291,11 +322,13 @@ function buildTaskEntity(
     msdyn_projecttaskid: taskId,
     'msdyn_project@odata.bind': `/msdyn_projects(${projectId})`,
     'msdyn_projectbucket@odata.bind': `/msdyn_projectbuckets(${bucketId})`,
-    msdyn_subject: task.TaskName,
+    msdyn_subject: getTaskSubject(task),
     msdyn_scheduledstart: task.TaskStartDate,
     msdyn_scheduledend: task.TaskFinishDate,
     msdyn_start: task.TaskStartDate,
-    msdyn_duration: task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes,
+    msdyn_duration: getTaskDuration(task),
+    ...(getTaskEffort(task) != null ? { msdyn_effort: getTaskEffort(task) } : {}),
+    ...(task.TaskPercentCompleted != null ? { msdyn_progress: task.TaskPercentCompleted } : {}),
     ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {})
   }
 }
