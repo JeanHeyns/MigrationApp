@@ -71,6 +71,41 @@ export interface ImportError {
   timestamp: string
 }
 
+export interface ProjectFieldWriteDiagnostic {
+  poField: string
+  sourceKey?: string
+  targetLogicalName: string
+  targetColumnType: string
+  sourceValue: unknown
+  hasSourceValue: boolean
+  migrateValue: boolean
+  skipped: boolean
+  resolvedInPatch: boolean
+  skipReason?: string
+}
+
+export interface ProjectWriteDiagnostic {
+  poProjectId: string
+  poProjectName: string
+  dvProjectId?: string
+  mode: 'created' | 'existing' | 'createFailed'
+  createPayload?: Record<string, unknown>
+  createResponse?: Record<string, unknown>
+  patchPayload: Record<string, unknown>
+  ownerBind: Record<string, unknown>
+  mappedFields: ProjectFieldWriteDiagnostic[]
+  skippedFields: Array<{
+    poField: string
+    dvField: string
+    reason: string
+    originalValue: unknown
+    partialResolution?: { resolvedLabels: string[]; failedLabels: string[] }
+  }>
+  patchAttempted: boolean
+  patchSucceeded?: boolean
+  patchError?: string
+}
+
 export interface LogEntry {
   timestamp: string
   level: 'info' | 'success' | 'error' | 'warning'

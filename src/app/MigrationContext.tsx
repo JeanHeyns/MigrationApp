@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useState } from 'react'
 import type { PoFetchedData } from '../models/projectOnline.types'
 import type { MappingConfiguration, OptionSetMapping } from '../models/mapping.types'
-import type { DvSolution, ImportResult, LogEntry } from '../models/plannerPremium.types'
+import type { DvSolution, ImportResult, LogEntry, ProjectWriteDiagnostic } from '../models/plannerPremium.types'
 import type { MigrationMode, SchemaCreationResults, SchemaSnapshot, ResolverPlan, SkippedFieldInstance } from '../models/dataOnly.types'
 import { clearDataverseOrgUrl, setDataverseOrgUrl } from '../config/environment'
 
@@ -90,6 +90,7 @@ interface MigrationState {
   schemaSnapshot: SchemaSnapshot | null
   resolverPlan: ResolverPlan | null
   skippedFieldInstances: SkippedFieldInstance[]
+  projectWriteDiagnostics: ProjectWriteDiagnostic[]
   schemaCreationResults: SchemaCreationResults | null
   migrationScope: MigrationScope
   importProgress: ImportProgress | null
@@ -126,6 +127,8 @@ interface MigrationActions {
   setResolverPlan: (plan: ResolverPlan | null) => void
   addSkippedFieldInstances: (instances: SkippedFieldInstance[]) => void
   clearSkippedFieldInstances: () => void
+  addProjectWriteDiagnostics: (diagnostics: ProjectWriteDiagnostic[]) => void
+  clearProjectWriteDiagnostics: () => void
   setSchemaCreationResults: (results: SchemaCreationResults | null) => void
   resetState: () => void
   setMigrationScope: (partial: Partial<Omit<MigrationScope, 'projects'>>) => void
@@ -161,6 +164,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [schemaSnapshot, setSchemaSnapshot] = useState<SchemaSnapshot | null>(null)
   const [resolverPlan, setResolverPlan] = useState<ResolverPlan | null>(null)
   const [skippedFieldInstances, setSkippedFieldInstances] = useState<SkippedFieldInstance[]>([])
+  const [projectWriteDiagnostics, setProjectWriteDiagnostics] = useState<ProjectWriteDiagnostic[]>([])
   const [schemaCreationResults, setSchemaCreationResults] = useState<SchemaCreationResults | null>(null)
   const [migrationScope, setMigrationScopeState] = useState<MigrationScope>(DEFAULT_MIGRATION_SCOPE)
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
@@ -219,6 +223,9 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setSkippedFieldInstances(prev => [...prev, ...instances]), [])
 
   const clearSkippedFieldInstances = useCallback(() => setSkippedFieldInstances([]), [])
+  const addProjectWriteDiagnostics = useCallback((diagnostics: ProjectWriteDiagnostic[]) =>
+    setProjectWriteDiagnostics(prev => [...prev, ...diagnostics]), [])
+  const clearProjectWriteDiagnostics = useCallback(() => setProjectWriteDiagnostics([]), [])
 
   const setMigrationScope = useCallback((partial: Partial<Omit<MigrationScope, 'projects'>>) => {
     setMigrationScopeState(prev => {
@@ -272,6 +279,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setSchemaSnapshot(null)
     setResolverPlan(null)
     setSkippedFieldInstances([])
+    setProjectWriteDiagnostics([])
     setSchemaCreationResults(null)
     setImportProgress(null)
     setStopRequested(false)
@@ -327,6 +335,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setSchemaSnapshot(null)
     setResolverPlan(null)
     setSkippedFieldInstances([])
+    setProjectWriteDiagnostics([])
     setSchemaCreationResults(null)
     setMigrationScopeState(DEFAULT_MIGRATION_SCOPE)
     setImportProgress(null)
@@ -342,6 +351,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       fetchedData, selectedProjectIds, projectFilter,
       mappingConfig, optionSetMappings, importResults, logs,
       migrationMode, schemaSnapshot, resolverPlan, schemaCreationResults,
+      skippedFieldInstances, projectWriteDiagnostics,
       migrationScope, importProgress, stopRequested, importWasStopped,
       setCurrentStep, nextStep, prevStep, setPwaUrl,
       setResolvedDataverseUrl, setDataverseUrlError, clearResolvedDataverseUrl,
@@ -353,7 +363,8 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       setMappingConfig, setOptionSetMappings,
       addImportResult, clearImportResults, addLog, clearLogs,
       setMigrationMode, setSchemaSnapshot, setResolverPlan,
-      skippedFieldInstances, addSkippedFieldInstances, clearSkippedFieldInstances,
+      addSkippedFieldInstances, clearSkippedFieldInstances,
+      addProjectWriteDiagnostics, clearProjectWriteDiagnostics,
       setSchemaCreationResults, resetState,
       setMigrationScope, startImport, completeProject, clearImportProgress,
       requestStop, clearStopRequest, setImportWasStopped,

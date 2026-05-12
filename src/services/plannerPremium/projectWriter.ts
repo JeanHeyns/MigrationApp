@@ -1,6 +1,6 @@
 import type { PoProject } from '../../models/projectOnline.types'
-import type { MappingConfiguration, OptionSetMapping } from '../../models/mapping.types'
-import type { ImportError } from '../../models/plannerPremium.types'
+import type { FieldMapping, MappingConfiguration, OptionSetMapping } from '../../models/mapping.types'
+import type { ImportError, ProjectFieldWriteDiagnostic, ProjectWriteDiagnostic } from '../../models/plannerPremium.types'
 import type { FieldResolver } from './resolverFactory'
 import type { SkippedField } from './recordResolverApplier'
 import { listRecords, performUnboundAction, patchRecord } from './dataverseClient'
@@ -20,6 +20,7 @@ export interface ProjectWriteResult {
   /** Set when the project record was created but the custom-field patch failed (dataOnly mode). success stays true. */
   error?: ImportError
   skippedFields?: SkippedField[]
+  diagnostic?: ProjectWriteDiagnostic
 }
 
 /**
@@ -62,17 +63,19 @@ export async function writeProjects(
       const existingId = cleanGuid(getRecordId(existing[0] ?? {}, 'msdyn_projectid'))
 
       if (existingId) {
-        const { error, skippedFields } = await applyProjectPatch(
+        const { error, skippedFields, diagnostic } = await applyProjectPatch(
           existingId, project, mappingConfig, effectiveResolvers, isFirstProject,
           ownerOverrides?.[project.ProjectId],
         )
         isFirstProject = false
+        diagnostic.mode = 'existing'
         const result: ProjectWriteResult = {
           poProjectId: project.ProjectId,
           dvProjectId: existingId,
           success: true,
           ...(error ? { error } : {}),
           ...(skippedFields?.length ? { skippedFields } : {}),
+          diagnostic,
         }
         results.push(result)
         onProgress?.(result)
@@ -94,6 +97,7 @@ export async function writeProjects(
 
       let patchError: ImportError | undefined
       let skippedFields: SkippedField[] | undefined
+      let diagnostic: ProjectWriteDiagnostic | undefined
 
       if (dvProjectId) {
         const patchResult = await applyProjectPatch(
@@ -102,6 +106,25 @@ export async function writeProjects(
         )
         patchError = patchResult.error
         skippedFields = patchResult.skippedFields
+        diagnostic = {
+          ...patchResult.diagnostic,
+          mode: 'created',
+          createPayload: body.Project,
+          createResponse: response as Record<string, unknown>,
+        }
+      } else {
+        diagnostic = {
+          poProjectId: project.ProjectId,
+          poProjectName: project.ProjectName,
+          mode: 'createFailed',
+          createPayload: body.Project,
+          createResponse: response as Record<string, unknown>,
+          patchPayload: {},
+          ownerBind: {},
+          mappedFields: [],
+          skippedFields: [],
+          patchAttempted: false,
+        }
       }
       isFirstProject = false
 
@@ -115,6 +138,7 @@ export async function writeProjects(
             ? { error: patchError }
             : {}),
         ...(skippedFields?.length ? { skippedFields } : {}),
+        ...(diagnostic ? { diagnostic } : {}),
       }
       results.push(result)
       onProgress?.(result)
@@ -135,6 +159,7 @@ export async function writeProjects(
 interface PatchResult {
   error?: ImportError
   skippedFields?: SkippedField[]
+  diagnostic: ProjectWriteDiagnostic
 }
 
 async function applyProjectPatch(
@@ -182,18 +207,72 @@ async function applyProjectPatch(
   }
 
   const patch: Record<string, unknown> = { ...customPayload, ...ownerBind }
+  const diagnosticBase: ProjectWriteDiagnostic = {
+    poProjectId: project.ProjectId,
+    poProjectName: project.ProjectName,
+    dvProjectId,
+    mode: 'created',
+    patchPayload: patch,
+    ownerBind,
+    mappedFields: buildProjectFieldDiagnostics(project, projectFieldMappings, customPayload, applied.skippedFields),
+    skippedFields: applied.skippedFields,
+    patchAttempted: Object.keys(patch).length > 0,
+  }
 
-  if (Object.keys(patch).length === 0) return { skippedFields }
+  if (Object.keys(patch).length === 0) {
+    return {
+      skippedFields,
+      diagnostic: { ...diagnosticBase, patchSucceeded: undefined },
+    }
+  }
 
   try {
     await patchRecord('msdyn_projects', dvProjectId, patch)
-    return { skippedFields }
-  } catch (e) {
     return {
-      error: nowError('Project', dvProjectId, `Custom field patch failed: ${String(e)}`),
       skippedFields,
+      diagnostic: { ...diagnosticBase, patchSucceeded: true },
+    }
+  } catch (e) {
+    const message = `Custom field patch failed: ${String(e)}`
+    return {
+      error: nowError('Project', dvProjectId, message),
+      skippedFields,
+      diagnostic: { ...diagnosticBase, patchSucceeded: false, patchError: message },
     }
   }
+}
+
+function buildProjectFieldDiagnostics(
+  project: PoProject,
+  mappings: FieldMapping[],
+  customPayload: Record<string, unknown>,
+  skippedFields: SkippedField[],
+): ProjectFieldWriteDiagnostic[] {
+  return mappings.map(mapping => {
+    const sourceKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
+    const sourceValue = getProjectSourceValue(project, mapping)
+    const skipped = skippedFields.find(sf => sf.poField === mapping.customField.CustomFieldName)
+    const targetLogicalName = mapping.targetLogicalName
+    return {
+      poField: mapping.customField.CustomFieldName,
+      sourceKey,
+      targetLogicalName,
+      targetColumnType: mapping.targetColumnType,
+      sourceValue,
+      hasSourceValue: sourceValue !== undefined && sourceValue !== null && sourceValue !== '',
+      migrateValue: mapping.migrateValue,
+      skipped: mapping.skip,
+      resolvedInPatch: Object.prototype.hasOwnProperty.call(customPayload, targetLogicalName)
+        || Object.prototype.hasOwnProperty.call(customPayload, `${targetLogicalName}@odata.bind`),
+      ...(skipped ? { skipReason: skipped.reason } : {}),
+    }
+  })
+}
+
+function getProjectSourceValue(project: PoProject, mapping: FieldMapping): unknown {
+  const fieldName = mapping.customField.ODataFieldName
+  if (fieldName && project[fieldName] !== undefined) return project[fieldName]
+  return project[mapping.customField.CustomFieldName]
 }
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

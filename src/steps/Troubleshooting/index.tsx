@@ -78,6 +78,20 @@ const useStyles = makeStyles({
     maxHeight: '420px',
   },
   footer: { display: 'flex', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' },
+  fullPanel: {
+    background: tokens.colorNeutralBackground1,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRadius: '8px',
+    padding: '14px',
+    minWidth: 0,
+  },
+  projectHeader: {
+    display: 'grid',
+    gridTemplateColumns: 'minmax(220px, 360px) 1fr',
+    gap: '12px',
+    alignItems: 'end',
+    marginBottom: '12px',
+  },
 })
 
 interface TroubleData {
@@ -107,9 +121,10 @@ function choiceAttributeType(rawAttribute: EntityWithCustomAttributes['rawAttrs'
 
 export function Troubleshooting() {
   const styles = useStyles()
-  const { schemaSnapshot, setCurrentStep } = useMigration()
+  const { schemaSnapshot, setCurrentStep, projectWriteDiagnostics, fetchedData } = useMigration()
   const [entityName, setEntityName] = useState(TARGET_ENTITIES[0].logicalName)
   const [fieldName, setFieldName] = useState('')
+  const [projectDiagnosticId, setProjectDiagnosticId] = useState('')
   const [data, setData] = useState<TroubleData | null>(null)
   const [globalOptionSet, setGlobalOptionSet] = useState<GlobalOptionSetMeta | null>(null)
   const [attributeOptionSet, setAttributeOptionSet] = useState<AttributeOptionSetMetadata | null>(null)
@@ -124,6 +139,46 @@ export function Troubleshooting() {
   const rawMultiPicklist = data?.multiPicklists.find(a => a.LogicalName === fieldName)
   const rawChoice = rawPicklist ?? rawMultiPicklist
   const rawChoiceType = choiceAttributeType(rawAttribute)
+  const selectedProjectDiagnostic = projectWriteDiagnostics.find(d => d.poProjectId === projectDiagnosticId) ?? projectWriteDiagnostics[0]
+  const selectedPatchSummary = selectedProjectDiagnostic ? {
+    project: selectedProjectDiagnostic.poProjectName,
+    poProjectId: selectedProjectDiagnostic.poProjectId,
+    dvProjectId: selectedProjectDiagnostic.dvProjectId,
+    mode: selectedProjectDiagnostic.mode,
+    patchAttempted: selectedProjectDiagnostic.patchAttempted,
+    patchSucceeded: selectedProjectDiagnostic.patchSucceeded,
+    patchError: selectedProjectDiagnostic.patchError,
+    patchKeys: Object.keys(selectedProjectDiagnostic.patchPayload),
+    ownerKeys: Object.keys(selectedProjectDiagnostic.ownerBind),
+    mappedFields: selectedProjectDiagnostic.mappedFields.length,
+    fieldsResolvedInPatch: selectedProjectDiagnostic.mappedFields.filter(f => f.resolvedInPatch).length,
+    fieldsNotResolvedInPatch: selectedProjectDiagnostic.mappedFields
+      .filter(f => f.migrateValue && !f.skipped && !f.resolvedInPatch)
+      .map(f => ({
+        poField: f.poField,
+        sourceKey: f.sourceKey,
+        targetLogicalName: f.targetLogicalName,
+        targetColumnType: f.targetColumnType,
+        hasSourceValue: f.hasSourceValue,
+        sourceValue: f.sourceValue,
+        skipReason: f.skipReason,
+      })),
+    skippedFields: selectedProjectDiagnostic.skippedFields,
+  } : undefined
+  const projectDiagnosticSummary = {
+    totalProjectsTracked: projectWriteDiagnostics.length,
+    created: projectWriteDiagnostics.filter(d => d.mode === 'created').length,
+    existing: projectWriteDiagnostics.filter(d => d.mode === 'existing').length,
+    createFailed: projectWriteDiagnostics.filter(d => d.mode === 'createFailed').length,
+    patchAttempted: projectWriteDiagnostics.filter(d => d.patchAttempted).length,
+    patchSucceeded: projectWriteDiagnostics.filter(d => d.patchSucceeded === true).length,
+    patchFailed: projectWriteDiagnostics.filter(d => d.patchSucceeded === false).length,
+    fieldsNotResolvedInPatch: projectWriteDiagnostics.reduce(
+      (sum, d) => sum + d.mappedFields.filter(f => f.migrateValue && !f.skipped && !f.resolvedInPatch).length,
+      0,
+    ),
+    skippedFieldValues: projectWriteDiagnostics.reduce((sum, d) => sum + d.skippedFields.length, 0),
+  }
 
   const fieldOptions = useMemo(() => {
     const fields = new Map<string, { logicalName: string; label: string; type?: string }>()
@@ -179,6 +234,11 @@ export function Troubleshooting() {
     loadEntity(entityName)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entityName])
+
+  useEffect(() => {
+    if (projectDiagnosticId && projectWriteDiagnostics.some(d => d.poProjectId === projectDiagnosticId)) return
+    setProjectDiagnosticId(projectWriteDiagnostics[0]?.poProjectId ?? '')
+  }, [projectDiagnosticId, projectWriteDiagnostics])
 
   useEffect(() => {
     setAttributeOptionSet(null)
@@ -286,6 +346,44 @@ export function Troubleshooting() {
           <MessageBarBody>No schema snapshot is loaded. Go to Step 1 and scan the target solution to compare snapshot data.</MessageBarBody>
         </MessageBar>
       )}
+
+      <section className={styles.fullPanel}>
+        <div className={styles.panelTitle}>Project Creation Diagnostics</div>
+        <div className={styles.projectHeader}>
+          <label className={styles.field}>
+            <span className={styles.label}>Project</span>
+            <Select
+              value={selectedProjectDiagnostic?.poProjectId ?? ''}
+              onChange={(_, d) => setProjectDiagnosticId(d.value)}
+              disabled={projectWriteDiagnostics.length === 0}
+            >
+              {projectWriteDiagnostics.map(diag => {
+                const projectName = diag.poProjectName
+                  || fetchedData?.projects.find(p => p.ProjectId === diag.poProjectId)?.ProjectName
+                  || diag.poProjectId
+                return (
+                  <option key={diag.poProjectId} value={diag.poProjectId}>
+                    {projectName} ({diag.mode}{diag.patchSucceeded === false ? ', patch failed' : ''})
+                  </option>
+                )
+              })}
+            </Select>
+          </label>
+          <pre className={styles.pre}>{pretty(projectDiagnosticSummary)}</pre>
+        </div>
+        {projectWriteDiagnostics.length === 0 ? (
+          <MessageBar>
+            <MessageBarBody>No project write diagnostics yet. Run Step 4 to capture create and patch payload details.</MessageBarBody>
+          </MessageBar>
+        ) : (
+          <>
+            <div className={styles.panelTitle}>Selected Project Patch Summary</div>
+            <pre className={styles.pre}>{pretty(selectedPatchSummary)}</pre>
+            <div className={styles.panelTitle}>Selected Project Full Diagnostic</div>
+            <pre className={styles.pre}>{pretty(selectedProjectDiagnostic)}</pre>
+          </>
+        )}
+      </section>
 
       <div className={styles.grid}>
         <section className={styles.panel}>

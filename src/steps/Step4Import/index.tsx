@@ -88,6 +88,7 @@ export function Step4Import() {
     addImportResult, clearImportResults,
     migrationMode, resolverPlan,
     addSkippedFieldInstances, clearSkippedFieldInstances,
+    addProjectWriteDiagnostics, clearProjectWriteDiagnostics,
     addLog, setCurrentStep,
     migrationScope,
     importProgress, startImport, completeProject, clearImportProgress,
@@ -238,6 +239,7 @@ export function Step4Import() {
     setLogLines([])
     clearImportResults()
     clearSkippedFieldInstances()
+    clearProjectWriteDiagnostics()
     clearStopRequest()
     clearImportProgress()
     stopRequestedRef.current = false
@@ -319,6 +321,7 @@ export function Step4Import() {
             appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} project${r.error ? `: ${r.error.message}` : ''}${r.skippedFields?.length ? ` (${r.skippedFields.length} field(s) skipped)` : ''}`)
           }, resolvers, projectOwnerMap)
           allProjectResults.push(...projectResults)
+          addProjectWriteDiagnostics(projectResults.flatMap(r => r.diagnostic ? [r.diagnostic] : []))
 
           if (isDataOnly) {
             const skipped: SkippedFieldInstance[] = projectResults.flatMap(r =>
