@@ -251,7 +251,7 @@ function buildProjectFieldDiagnostics(
   return mappings.map(mapping => {
     const sourceKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
     const sourceValue = getProjectSourceValue(project, mapping)
-    const skipped = skippedFields.find(sf => sf.poField === mapping.customField.CustomFieldName)
+    const skipped = skippedFields.find(sf => sf.poField === sourceKey || sf.poField === mapping.customField.CustomFieldName)
     const targetLogicalName = mapping.targetLogicalName
     return {
       poField: mapping.customField.CustomFieldName,

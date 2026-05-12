@@ -78,7 +78,7 @@ export async function buildFullModeResolverMap(
   const resolvers = new Map<string, FieldResolver>()
   for (const mapping of fieldMappings) {
     if (mapping.skip || !mapping.migrateValue) continue
-    const fieldKey = mapping.customField.ODataFieldName
+    const fieldKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
     if (!fieldKey) continue
     const resolver = await buildFullModeFieldResolver(mapping, optionSetMappings)
     if (resolver) resolvers.set(fieldKey, resolver)
@@ -386,18 +386,16 @@ function inlineOptionSetFromEntry(entry: ResolverEntry): GlobalOptionSetMeta | n
 
   const name = entry.optionSetName ?? entry.optionSetMetadataId ?? `${entry.dvLogicalName} inline option set`
   const cacheKey = optionSetCacheKey(entry)
-  const cached = optionSetCache.get(cacheKey)
-  if (cached) {
-    if (isDebug()) console.info('[dataOnly] inline option set cache hit', {
-      field: entry.poFieldName,
-      dvLogicalName: entry.dvLogicalName,
-      name,
-      cacheKey,
-    })
-    return cached
-  }
 
+  // Always build from this entry's own inlineOptions — the cached version may belong to
+  // a different field that shares the same cacheKey (e.g. same global option set name but
+  // different attribute-level options captured during schema scan). Using a stale cached
+  // optionSet here would cause the DV labels in the value map to not match this field's
+  // actual options, so only some PO values would resolve correctly.
   const optionSet = { name, displayName: name, options }
+
+  // Still populate the shared cache so that fetchOptionSet() can skip the network call
+  // for any field that doesn't have inline options but shares this cacheKey.
   optionSetCache.set(cacheKey, optionSet)
   if (entry.optionSetName) optionSetCache.set(entry.optionSetName, optionSet)
 

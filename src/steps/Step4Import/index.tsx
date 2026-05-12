@@ -77,9 +77,23 @@ const useStyles = makeStyles({
     color: tokens.colorNeutralForeground2,
     flexWrap: 'wrap',
   },
+  thSortable: {
+    textAlign: 'left',
+    padding: '8px 10px',
+    background: tokens.colorNeutralBackground3,
+    borderBottom: `2px solid ${tokens.colorNeutralStroke1}`,
+    fontWeight: '600',
+    color: tokens.colorNeutralForeground2,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    ':hover': { background: tokens.colorNeutralBackground4 },
+  },
 })
 
 type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Importing' | 'Done' | 'Stopped' | 'Failed'
+type SortCol = 'name' | 'start' | 'finish' | 'owner'
+type SortDir = 'asc' | 'desc'
 
 export function Step4Import() {
   const styles = useStyles()
@@ -107,6 +121,8 @@ export function Step4Import() {
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
   const [stopButtonPressed, setStopButtonPressed] = useState(false)
   const [elapsed, setElapsed] = useState(0)
+  const [sortCol, setSortCol] = useState<SortCol>('name')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
   const logRef = useRef<HTMLDivElement>(null)
   const stopRequestedRef = useRef(false)
 
@@ -188,6 +204,29 @@ export function Step4Import() {
       : (fetchedData?.projects ?? []),
     [fetchedData?.projects, projectFilter, tasksByProjectId],
   )
+
+  const sortedProjects = useMemo(() => {
+    const arr = [...filteredProjects]
+    arr.sort((a, b) => {
+      let av = '', bv = ''
+      if (sortCol === 'name')   { av = a.ProjectName ?? '';       bv = b.ProjectName ?? '' }
+      if (sortCol === 'start')  { av = a.ProjectStartDate ?? '';  bv = b.ProjectStartDate ?? '' }
+      if (sortCol === 'finish') { av = a.ProjectFinishDate ?? ''; bv = b.ProjectFinishDate ?? '' }
+      if (sortCol === 'owner')  { av = a.ProjectOwnerName ?? '';  bv = b.ProjectOwnerName ?? '' }
+      return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
+    })
+    return arr
+  }, [filteredProjects, sortCol, sortDir])
+
+  function handleSort(col: SortCol) {
+    if (sortCol === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortCol(col); setSortDir('asc') }
+  }
+
+  function sortIndicator(col: SortCol) {
+    if (sortCol !== col) return ' ↕'
+    return sortDir === 'asc' ? ' ▲' : ' ▼'
+  }
 
   if (!fetchedData || !mappingConfig) {
     return (
@@ -459,13 +498,6 @@ export function Step4Import() {
         </MessageBarBody>
       </MessageBar>
 
-      <Checkbox
-        checked={confirmScheduleRebuild}
-        disabled={running}
-        label="I understand selected project schedules will be cleared and rebuilt"
-        onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
-      />
-
       <div style={{ fontSize: '13px', color: tokens.colorNeutralForeground3 }}>
         Scope: Projects ✓
         {migrationScope.tasks ? ' · Tasks ✓' : ' · Tasks ✗'}
@@ -481,7 +513,7 @@ export function Step4Import() {
 
       <BulkActions
         allProjectIds={data.projects.map(p => p.ProjectId)}
-        displayedProjectIds={filteredProjects.map(p => p.ProjectId)}
+        displayedProjectIds={sortedProjects.map(p => p.ProjectId)}
         disabled={running}
       />
       <span className={styles.muted} style={{ fontSize: '13px' }}>
@@ -496,14 +528,14 @@ export function Step4Import() {
           <thead>
             <tr>
               <th className={styles.th} style={{ width: '48px' }}>Import</th>
-              <th className={styles.th}>Project</th>
-              <th className={styles.th}>Start</th>
-              <th className={styles.th}>Finish</th>
-              <th className={styles.th}>Owner / Project Manager</th>
+              <th className={styles.thSortable} onClick={() => handleSort('name')}>Project{sortIndicator('name')}</th>
+              <th className={styles.thSortable} onClick={() => handleSort('start')}>Start{sortIndicator('start')}</th>
+              <th className={styles.thSortable} onClick={() => handleSort('finish')}>Finish{sortIndicator('finish')}</th>
+              <th className={styles.thSortable} onClick={() => handleSort('owner')}>Owner / Project Manager{sortIndicator('owner')}</th>
             </tr>
           </thead>
           <tbody>
-            {filteredProjects.map(project => (
+            {sortedProjects.map(project => (
               <tr key={project.ProjectId}>
                 <td className={styles.td}>
                   <Checkbox
@@ -558,7 +590,13 @@ export function Step4Import() {
             <span>Projects: {importProgress.projectsCompleted} / {importProgress.projectsTotal}</span>
             <span>Elapsed: {formatDuration(elapsed)}</span>
             <span>
-              ETA: {importProgress.etaMs != null ? `~${formatDuration(importProgress.etaMs)}` : 'Calculating…'}
+              ETA: {(() => {
+                const { projectsCompleted, projectsTotal } = importProgress
+                const remaining = projectsTotal - projectsCompleted
+                if (projectsCompleted === 0 || elapsed === 0) return 'Calculating…'
+                const etaMs = Math.max(0, Math.round((remaining / projectsCompleted) * elapsed))
+                return `~${formatDuration(etaMs)}`
+              })()}
             </span>
           </div>
         )}
@@ -571,6 +609,13 @@ export function Step4Import() {
           </div>
         )}
       </div>
+
+      <Checkbox
+        checked={confirmScheduleRebuild}
+        disabled={running}
+        label="I understand selected project schedules will be cleared and rebuilt"
+        onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
+      />
 
       <div className={styles.footer}>
         <Button onClick={prevStep} disabled={running}>Back</Button>

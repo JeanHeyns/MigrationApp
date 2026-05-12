@@ -1,6 +1,9 @@
 import { odataGetAll } from './odataClient'
 import type { PoProject, PoTaskDependency, PoDependencyType } from '../../models/projectOnline.types'
 
+const DEFAULT_DEPENDENCY_FETCH_CONCURRENCY = 6
+const MAX_DEPENDENCY_FETCH_CONCURRENCY = 12
+
 const DEPENDENCY_TYPES: Record<number, PoDependencyType> = {
   0: 'FF',
   1: 'FS',
@@ -9,14 +12,18 @@ const DEPENDENCY_TYPES: Record<number, PoDependencyType> = {
 }
 
 export async function fetchDependencies(siteUrl: string, projects: PoProject[]): Promise<PoTaskDependency[]> {
-  const dependencies: PoTaskDependency[] = []
+  const projectRows = await runWithConcurrency(
+    projects,
+    project => fetchProjectTaskLinks(siteUrl, project),
+    getDependencyFetchConcurrency(),
+  )
 
-  for (const project of projects) {
-    const rows = await fetchProjectTaskLinks(siteUrl, project)
-    dependencies.push(...rows.map((row, index) => normalizeDependency(project.ProjectId, row, index)))
-  }
-
-  return dependencies.filter(dep => dep.PredecessorTaskId && dep.SuccessorTaskId)
+  return projectRows
+    .flatMap((rows, projectIndex) => {
+      const projectId = stringValue(projects[projectIndex]?.ProjectId)
+      return rows.map((row, rowIndex) => normalizeDependency(projectId, row, rowIndex))
+    })
+    .filter(dep => dep.PredecessorTaskId && dep.SuccessorTaskId)
 }
 
 async function fetchProjectTaskLinks(siteUrl: string, project: PoProject): Promise<Record<string, unknown>[]> {
@@ -80,4 +87,39 @@ function numberValue(value: unknown): number | undefined {
   if (value == null || value === '') return undefined
   const n = Number(value)
   return Number.isFinite(n) ? n : undefined
+}
+
+function getDependencyFetchConcurrency(): number {
+  if (typeof window === 'undefined') return DEFAULT_DEPENDENCY_FETCH_CONCURRENCY
+
+  const override = window.localStorage.getItem('PROJECT_ONLINE_DEPENDENCY_FETCH_CONCURRENCY')
+  if (!override) return DEFAULT_DEPENDENCY_FETCH_CONCURRENCY
+
+  const parsed = parseInt(override, 10)
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_DEPENDENCY_FETCH_CONCURRENCY
+
+  return Math.min(parsed, MAX_DEPENDENCY_FETCH_CONCURRENCY)
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  worker: (item: T, index: number) => Promise<R>,
+  concurrency: number,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let nextIndex = 0
+
+  const runOne = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex++
+      if (index >= items.length) return
+      results[index] = await worker(items[index], index)
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => runOne()),
+  )
+
+  return results
 }

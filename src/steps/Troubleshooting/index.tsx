@@ -153,7 +153,7 @@ export function Troubleshooting() {
     mappedFields: selectedProjectDiagnostic.mappedFields.length,
     fieldsResolvedInPatch: selectedProjectDiagnostic.mappedFields.filter(f => f.resolvedInPatch).length,
     fieldsNotResolvedInPatch: selectedProjectDiagnostic.mappedFields
-      .filter(f => f.migrateValue && !f.skipped && !f.resolvedInPatch)
+      .filter(f => f.migrateValue && !f.skipped && f.hasSourceValue && !f.resolvedInPatch)
       .map(f => ({
         poField: f.poField,
         sourceKey: f.sourceKey,
@@ -174,7 +174,7 @@ export function Troubleshooting() {
     patchSucceeded: projectWriteDiagnostics.filter(d => d.patchSucceeded === true).length,
     patchFailed: projectWriteDiagnostics.filter(d => d.patchSucceeded === false).length,
     fieldsNotResolvedInPatch: projectWriteDiagnostics.reduce(
-      (sum, d) => sum + d.mappedFields.filter(f => f.migrateValue && !f.skipped && !f.resolvedInPatch).length,
+      (sum, d) => sum + d.mappedFields.filter(f => f.migrateValue && !f.skipped && f.hasSourceValue && !f.resolvedInPatch).length,
       0,
     ),
     skippedFieldValues: projectWriteDiagnostics.reduce((sum, d) => sum + d.skippedFields.length, 0),

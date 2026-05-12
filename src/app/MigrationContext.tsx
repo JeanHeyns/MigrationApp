@@ -58,8 +58,6 @@ export interface ImportProgress {
   projectsCompleted: number
   projectsTotal: number
   concurrency: number
-  recentProjectDurations: number[]
-  etaMs: number | null
 }
 
 const DEFAULT_MIGRATION_SCOPE: MigrationScope = {
@@ -249,23 +247,13 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       projectsCompleted: 0,
       projectsTotal: totalProjects,
       concurrency,
-      recentProjectDurations: [],
-      etaMs: null,
     })
   }, [])
 
-  const completeProject = useCallback((durationMs: number) => {
+  const completeProject = useCallback((_durationMs: number) => {
     setImportProgress(prev => {
       if (!prev) return prev
-      const projectsCompleted = prev.projectsCompleted + 1
-      const recentProjectDurations = [...prev.recentProjectDurations.slice(-4), durationMs]
-      let etaMs: number | null = null
-      if (recentProjectDurations.length >= 3) {
-        const avgMs = recentProjectDurations.reduce((a, b) => a + b, 0) / recentProjectDurations.length
-        const remaining = prev.projectsTotal - projectsCompleted
-        etaMs = Math.round(Math.ceil(remaining / prev.concurrency) * avgMs)
-      }
-      return { ...prev, projectsCompleted, recentProjectDurations, etaMs }
+      return { ...prev, projectsCompleted: prev.projectsCompleted + 1 }
     })
   }, [])
 

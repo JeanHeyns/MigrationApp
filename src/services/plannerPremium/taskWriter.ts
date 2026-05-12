@@ -218,7 +218,14 @@ function getTaskDuration(task: PoTask): number | undefined {
 }
 
 function getTaskEffort(task: PoTask): number | undefined {
-  return task.TaskIsMilestone ? 0 : toMinutes(task.TaskWork)
+  const raw = task.TaskIsMilestone ? 0 : toMinutes(task.TaskWork)
+  return raw != null ? Math.round(raw * 100) / 100 : undefined
+}
+
+function getTaskProgress(task: PoTask): number | undefined {
+  if (task.TaskPercentCompleted == null) return undefined
+  const progress = Number(task.TaskPercentCompleted)
+  return Number.isFinite(progress) ? progress / 100 : undefined
 }
 
 function toMinutes(value: unknown): number | undefined {
@@ -328,7 +335,7 @@ function buildTaskEntity(
     msdyn_start: task.TaskStartDate,
     msdyn_duration: getTaskDuration(task),
     ...(getTaskEffort(task) != null ? { msdyn_effort: getTaskEffort(task) } : {}),
-    ...(task.TaskPercentCompleted != null ? { msdyn_progress: task.TaskPercentCompleted } : {}),
+    ...(getTaskProgress(task) != null ? { msdyn_progress: getTaskProgress(task) } : {}),
     ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {})
   }
 }

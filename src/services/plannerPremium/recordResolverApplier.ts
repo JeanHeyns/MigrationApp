@@ -26,8 +26,7 @@ export interface AppliedRecord {
  * Applies resolver map to a single PO record and returns a Dataverse-ready payload.
  *
  * Key contract:
- * - `resolvers` is keyed by ODataFieldName (same as used in ResolverPlan.fields[].poFieldName)
- * - Mappings where ODataFieldName is absent are skipped (no silent mismatches)
+ * - `resolvers` is keyed by ODataFieldName when present, otherwise CustomFieldName
  * - Fields without a resolver entry use direct pass-through (non-special types)
  * - Unresolved values → field omitted from payload, added to skippedFields
  */
@@ -42,11 +41,13 @@ export function applyResolvers(
   for (const mapping of fieldMappings) {
     if (mapping.skip || !mapping.migrateValue) continue
 
-    const fieldKey = mapping.customField.ODataFieldName
-    if (!fieldKey) continue  // no ODataFieldName → excluded from ResolverPlan, skip silently
+    const fieldKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
+    if (!fieldKey) continue
 
     const dvField = mapping.targetLogicalName
-    const poValue = poRecord[fieldKey]
+    const poValue = poRecord[fieldKey] !== undefined
+      ? poRecord[fieldKey]
+      : (mapping.customField.ODataFieldName ? poRecord[mapping.customField.CustomFieldName] : undefined)
     const resolver = resolvers.get(fieldKey)
 
     if (!resolver) {
