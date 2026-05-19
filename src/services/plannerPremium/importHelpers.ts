@@ -5,8 +5,13 @@ export function escapeODataString(value: string): string {
   return value.replace(/'/g, "''")
 }
 
-export function nowError(entity: string, sourceId: string, message: string): ImportError {
-  return { entity, sourceId, message, timestamp: new Date().toISOString() }
+export function nowError(entity: string, sourceId: string, message: string, errorClass?: string, projectId?: string): ImportError {
+  return {
+    entity, sourceId, message,
+    timestamp: new Date().toISOString(),
+    ...(errorClass ? { errorClass } : {}),
+    ...(projectId ? { projectId } : {}),
+  }
 }
 
 export function getRecordId(row: Record<string, unknown>, primaryKey: string): string | undefined {

@@ -5,6 +5,7 @@ import type { FieldResolver } from './resolverFactory'
 import type { SkippedField } from './recordResolverApplier'
 import { listRecords, performUnboundAction, patchRecord } from './dataverseClient'
 import { cleanGuid, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
+import { classifyDataverseError } from './errorClassifier'
 import { applyResolvers } from './recordResolverApplier'
 import { buildFullModeResolverMap } from './resolverFactory'
 
@@ -143,10 +144,11 @@ export async function writeProjects(
       results.push(result)
       onProgress?.(result)
     } catch (e) {
+      const errorClass = classifyDataverseError(e)
       const result: ProjectWriteResult = {
         poProjectId: project.ProjectId,
         success: false,
-        error: nowError('Project', project.ProjectId, String(e)),
+        error: nowError('Project', project.ProjectId, String(e), errorClass !== 'Other' ? errorClass : undefined, project.ProjectId),
       }
       results.push(result)
       onProgress?.(result)

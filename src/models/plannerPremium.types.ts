@@ -61,6 +61,7 @@ export interface ImportResult {
   total: number
   succeeded: number
   failed: number
+  skipped: number
   errors: ImportError[]
 }
 
@@ -69,6 +70,8 @@ export interface ImportError {
   sourceId: string
   message: string
   timestamp: string
+  errorClass?: string
+  projectId?: string
 }
 
 export interface ProjectFieldWriteDiagnostic {

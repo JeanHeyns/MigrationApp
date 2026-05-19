@@ -2,6 +2,7 @@ import type { PoAssignment, PoProjectTeamMember } from '../../models/projectOnli
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords, performUnboundAction } from './dataverseClient'
 import { chunks, cleanGuid, getRecordId, nowError } from './importHelpers'
+import { classifyDataverseError } from './errorClassifier'
 import { createOperationSet, executeOperationSet, queueScheduleCreate } from './scheduleApi'
 
 export interface AssignmentWriteResult {
@@ -31,7 +32,7 @@ export async function writeTeamMembers(
       const resourceId = resourceIdMap[resourceUid]
 
       if (!projectId || !resourceId) {
-        const result = { poAssignmentId: sourceId, success: false, error: nowError('TeamMember', sourceId, 'Project or bookable resource was not imported') }
+        const result = { poAssignmentId: sourceId, success: false, error: nowError('TeamMember', sourceId, 'Project or bookable resource was not imported', undefined, teamMember.ProjectId) }
         results.push(result)
         onProgress?.(result)
         continue
@@ -67,7 +68,8 @@ export async function writeTeamMembers(
       results.push(result)
       onProgress?.(result)
     } catch (e) {
-      const result = { poAssignmentId: sourceId, success: false, error: nowError('TeamMember', sourceId, String(e)) }
+      const errorClass = classifyDataverseError(e)
+      const result = { poAssignmentId: sourceId, success: false, error: nowError('TeamMember', sourceId, String(e), errorClass !== 'Other' ? errorClass : undefined, teamMember.ProjectId) }
       results.push(result)
       onProgress?.(result)
     }
@@ -91,7 +93,7 @@ export async function writeAssignments(
     if (!projectId) {
       for (const assignment of projectAssignments) {
         const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${getResourceUid(assignment)}`
-        const result = { poAssignmentId: sourceId, success: false, error: nowError('Assignment', sourceId, 'Project was not imported') }
+        const result = { poAssignmentId: sourceId, success: false, error: nowError('Assignment', sourceId, 'Project was not imported', undefined, poProjectId) }
         results.push(result)
         onProgress?.(result)
       }
@@ -151,7 +153,8 @@ export async function writeAssignments(
           queued += 1
           queuedResults.push({ poAssignmentId: sourceId, dvAssignmentId: assignmentId, success: true })
         } catch (e) {
-          const result = { poAssignmentId: sourceId, success: false, error: nowError('Assignment', sourceId, String(e)) }
+          const errorClass = classifyDataverseError(e)
+          const result = { poAssignmentId: sourceId, success: false, error: nowError('Assignment', sourceId, String(e), errorClass !== 'Other' ? errorClass : undefined, poProjectId) }
           results.push(result)
           onProgress?.(result)
         }
@@ -165,11 +168,12 @@ export async function writeAssignments(
             onProgress?.(result)
           }
         } catch (e) {
+          const errorClass = classifyDataverseError(e)
           for (const result of queuedResults) {
             const failed = {
               poAssignmentId: result.poAssignmentId,
               success: false,
-              error: nowError('Assignment', result.poAssignmentId, String(e)),
+              error: nowError('Assignment', result.poAssignmentId, String(e), errorClass !== 'Other' ? errorClass : undefined, poProjectId),
             }
             results.push(failed)
             onProgress?.(failed)

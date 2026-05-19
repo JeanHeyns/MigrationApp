@@ -3,7 +3,7 @@ import type { MappingConfiguration, OptionSetMapping } from '../../models/mappin
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords } from './dataverseClient'
 import { chunks, cleanGuid, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
-import { createOperationSet, executeOperationSet, queueScheduleCreate, queueScheduleDelete } from './scheduleApi'
+import { createOperationSet, executeOperationSet, executeOperationSetWithRetry, queueScheduleCreate, queueScheduleDelete } from './scheduleApi'
 
 const TASK_MATERIALIZATION_MAX_ATTEMPTS = 5
 const TASK_MATERIALIZATION_DELAY_MS = 20000
@@ -40,7 +40,7 @@ export async function writeTasks(
     const dvProjectId = projectIdMap[poProjectId]
     if (!dvProjectId) {
       for (const task of projectTasks) {
-        const result = { poTaskId: task.TaskId, success: false, error: nowError('Task', task.TaskId, 'Project was not imported') }
+        const result = { poTaskId: task.TaskId, success: false, error: nowError('Task', task.TaskId, 'Project was not imported', undefined, poProjectId) }
         results.push(result)
         onProgress?.(result)
       }
@@ -50,7 +50,7 @@ export async function writeTasks(
     const bucket = await findDefaultBucket(dvProjectId)
     if (!bucket) {
       for (const task of projectTasks) {
-        const result = { poTaskId: task.TaskId, success: false, error: nowError('Task', task.TaskId, 'Default project bucket was not found') }
+        const result = { poTaskId: task.TaskId, success: false, error: nowError('Task', task.TaskId, 'Default project bucket was not found', undefined, poProjectId) }
         results.push(result)
         onProgress?.(result)
       }
@@ -61,51 +61,136 @@ export async function writeTasks(
     const taskIdMap: Record<string, string> = {}
     const pending = projectTasks.filter(task => !isProjectSummaryTask(task)).sort(compareTasks)
 
-    for (const chunk of chunks(pending, 180)) {
-      if (chunk.length === 0) continue
-      const operationSetId = await createOperationSet(dvProjectId, `Project Online task import ${new Date().toISOString()}`)
-      let queued = 0
-      const queuedResults: TaskWriteResult[] = []
+    // committedLevels tracks taskId → outlineLevel for tasks already sent to Dataverse,
+    // enabling cross-batch parent level lookup in validateAndNormalizeOutlineLevels.
+    const committedLevels = new Map<string, number>()
 
-      for (const task of chunk) {
-        try {
+    // Multi-round deferred placement for tasks whose parent was not yet committed
+    let queue = [...pending]
+    let placementRound = 0
+    const MAX_PLACEMENT_ROUNDS = 3
+
+    while (queue.length > 0 && placementRound < MAX_PLACEMENT_ROUNDS) {
+      placementRound++
+      const nextRoundDeferred: PoTask[] = []
+
+      for (const chunk of chunks(queue, 180)) {
+        if (chunk.length === 0) continue
+
+        const { ready, deferred, warnings } = validateAndNormalizeOutlineLevels(chunk, committedLevels)
+
+        for (const w of warnings) {
+          console.warn('[taskWriter]', w)
+        }
+
+        nextRoundDeferred.push(...deferred)
+
+        if (ready.length === 0) continue
+
+        // Assign DV task IDs before queueing so taskIdMap is populated regardless of success
+        const ops = ready.map(task => {
           const taskId = sourceGuidOrNew(task.TaskId)
           taskIdMap[task.TaskId] = taskId
-          await queueScheduleCreate(operationSetId, buildTaskEntity(task, taskId, dvProjectId, bucket))
-          queued += 1
-          queuedResults.push({ poTaskId: task.TaskId, dvTaskId: taskId, success: true })
-        } catch (e) {
-          const result = { poTaskId: task.TaskId, success: false, error: nowError('Task', task.TaskId, String(e)) }
+          return { id: task.TaskId, entity: buildTaskEntity(task, taskId, dvProjectId, bucket) }
+        })
+
+        const batchResult = await executeOperationSetWithRetry(
+          dvProjectId,
+          ops,
+          `Project Online task import ${new Date().toISOString()}`,
+        )
+
+        for (const op of batchResult.succeeded) {
+          const dvTaskId = taskIdMap[op.id]
+          committedLevels.set(op.id, ready.find(t => t.TaskId === op.id)?.TaskOutlineLevel ?? 1)
+          const result: TaskWriteResult = { poTaskId: op.id, dvTaskId, success: true }
           results.push(result)
           onProgress?.(result)
         }
-      }
 
-      if (queued > 0) {
-        try {
-          await executeOperationSet(operationSetId)
-          for (const result of queuedResults) {
-            results.push(result)
-            onProgress?.(result)
+        for (const { op, reason, errorClass } of batchResult.failed) {
+          const result: TaskWriteResult = {
+            poTaskId: op.id,
+            dvTaskId: errorClass === 'AlreadyExists' ? taskIdMap[op.id] : undefined,
+            success: false,
+            error: nowError('Task', op.id, reason, errorClass, poProjectId),
           }
-        } catch (e) {
-          for (const result of queuedResults) {
-            const failed = {
-              poTaskId: result.poTaskId,
-              success: false,
-              error: nowError('Task', result.poTaskId, String(e)),
-            }
-            results.push(failed)
-            onProgress?.(failed)
+          results.push(result)
+          onProgress?.(result)
+          // For AlreadyExists, still track in committedLevels so deps can resolve
+          if (errorClass === 'AlreadyExists') {
+            committedLevels.set(op.id, pending.find(t => t.TaskId === op.id)?.TaskOutlineLevel ?? 1)
           }
         }
       }
+
+      queue = nextRoundDeferred
+    }
+
+    // Tasks still deferred after max placement rounds — fail them clearly
+    for (const task of queue) {
+      const result: TaskWriteResult = {
+        poTaskId: task.TaskId,
+        success: false,
+        error: nowError('Task', task.TaskId, 'Parent task could not be placed after 3 placement rounds', undefined, poProjectId),
+      }
+      results.push(result)
+      onProgress?.(result)
     }
 
     await remapMaterializedTaskIds(dvProjectId, pending, results)
   }
 
   return results
+}
+
+interface NormalizeResult {
+  ready: PoTask[]
+  deferred: PoTask[]
+  warnings: string[]
+}
+
+function validateAndNormalizeOutlineLevels(
+  tasks: PoTask[],
+  committedLevels: Map<string, number>,
+): NormalizeResult {
+  const ready: PoTask[] = []
+  const deferred: PoTask[] = []
+  const warnings: string[] = []
+  const inBatchLevels = new Map<string, number>(committedLevels)
+
+  // Tasks arrive sorted by TaskOutlineNumber (parents before children)
+  for (const task of tasks) {
+    const declared = task.TaskOutlineLevel ?? 1
+    const parentId = task.TaskParentId
+
+    if (!parentId || declared <= 1) {
+      const level = Math.max(1, declared)
+      ready.push(level !== declared ? { ...task, TaskOutlineLevel: level } : task)
+      inBatchLevels.set(task.TaskId, level)
+      continue
+    }
+
+    const parentLevel = inBatchLevels.get(parentId)
+
+    if (parentLevel === undefined) {
+      // Parent not yet seen — defer to next placement round
+      deferred.push(task)
+      continue
+    }
+
+    const allowed = parentLevel + 1
+    if (declared !== allowed) {
+      warnings.push(`Task ${task.TaskId}: OutlineLevel ${declared} normalized to ${allowed} (parent level ${parentLevel})`)
+      ready.push({ ...task, TaskOutlineLevel: allowed })
+      inBatchLevels.set(task.TaskId, allowed)
+    } else {
+      ready.push(task)
+      inBatchLevels.set(task.TaskId, declared)
+    }
+  }
+
+  return { ready, deferred, warnings }
 }
 
 async function remapMaterializedTaskIds(

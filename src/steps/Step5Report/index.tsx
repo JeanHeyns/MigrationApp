@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Button,
   MessageBar,
@@ -74,9 +74,62 @@ function downloadCsv(filename: string, rows: string[][]) {
 
 function flattenErrors(errors: ImportError[]): string[][] {
   return [
-    ['Entity', 'Source ID', 'Timestamp', 'Message'],
-    ...errors.map(error => [error.entity, error.sourceId, error.timestamp, error.message]),
+    ['Entity', 'Source ID', 'Timestamp', 'Message', 'ErrorClass'],
+    ...errors.map(error => [error.entity, error.sourceId, error.timestamp, error.message, error.errorClass ?? '']),
   ]
+}
+
+// ─── Error grouping ───────────────────────────────────────────────────────────
+
+const ERROR_CLASS_LABELS: Record<string, string> = {
+  OutlineDemoteTooFar: 'Outline level invalid (E_DEMOTETOOFAR)',
+  BatchFailed:         'Batch execution failed',
+  Timeout:             'Gateway timeout (transient)',
+  Throttled:           'API throttled',
+  NonFSDependency:     'Non-FS dependency type (license limitation)',
+  PredecessorMissing:  'Predecessor or successor task not imported',
+  Other:               'Other error',
+}
+
+interface ProjectGroup {
+  projectId: string
+  projectName: string
+  errors: ImportError[]
+}
+
+interface ErrorGroup {
+  errorClass: string
+  label: string
+  total: number
+  projectGroups: ProjectGroup[]
+}
+
+function buildErrorGroups(errors: ImportError[], projectNameMap: Map<string, string>): ErrorGroup[] {
+  // Group: errorClass → projectId → errors
+  const byClass = new Map<string, Map<string, ImportError[]>>()
+  for (const e of errors) {
+    const cls = e.errorClass ?? 'Other'
+    const pid = e.projectId ?? '__unknown__'
+    if (!byClass.has(cls)) byClass.set(cls, new Map())
+    const byProject = byClass.get(cls)!
+    const list = byProject.get(pid) ?? []
+    list.push(e)
+    byProject.set(pid, list)
+  }
+
+  return [...byClass.entries()].map(([cls, byProject]) => {
+    const projectGroups: ProjectGroup[] = [...byProject.entries()].map(([pid, errs]) => ({
+      projectId: pid,
+      projectName: pid === '__unknown__' ? 'Unknown project' : (projectNameMap.get(pid) ?? pid),
+      errors: errs,
+    }))
+    return {
+      errorClass: cls,
+      label: ERROR_CLASS_LABELS[cls] ?? cls,
+      total: projectGroups.reduce((s, g) => s + g.errors.length, 0),
+      projectGroups,
+    }
+  })
 }
 
 function schemaRows(results: SchemaCreationResults): string[][] {
@@ -150,19 +203,33 @@ function buildSkippedGroups(instances: SkippedFieldInstance[]): SkippedGroup[] {
 export function Step5Report() {
   const styles = useStyles()
   const {
-    importResults, prevStep,
+    importResults, prevStep, setCurrentStep,
     migrationMode, skippedFieldInstances, selectedSolution,
     schemaCreationResults, resetState,
-    selectedProjectIds, fetchedData,
+    selectedProjectIds, fetchedData, setSelectedProjectIds,
   } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
   const totalSucceeded = importResults.reduce((s, r) => s + r.succeeded, 0)
   const totalFailed = importResults.reduce((s, r) => s + r.failed, 0)
+  const totalSkipped = importResults.reduce((s, r) => s + (r.skipped ?? 0), 0)
   const allErrors = importResults.flatMap(r => r.errors)
   const successRate = totalRecords > 0 ? Math.round((totalSucceeded / totalRecords) * 100) : 0
 
   const skippedGroups = useMemo(() => buildSkippedGroups(skippedFieldInstances), [skippedFieldInstances])
+  const projectNameMap = useMemo(() => new Map(
+    (fetchedData?.projects ?? []).map(p => [p.ProjectId, p.ProjectName])
+  ), [fetchedData])
+  const errorGroups = useMemo(() => buildErrorGroups(allErrors, projectNameMap), [allErrors, projectNameMap])
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+
+  function toggleGroup(key: string) {
+    setExpandedGroups(prev => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+  }
 
   function exportSummary() {
     downloadCsv('migration-summary.csv', [
@@ -201,6 +268,11 @@ export function Step5Report() {
     const solutionName = selectedSolution?.uniquename ?? 'unknown'
     const date = new Date().toISOString().slice(0, 10)
     downloadCsv(`schema-creation-${solutionName}-${date}.csv`, schemaRows(schemaCreationResults))
+  }
+
+  function handleNextBatch() {
+    setSelectedProjectIds(new Set())
+    setCurrentStep(2)
   }
 
   function handleStartNew() {
@@ -345,35 +417,99 @@ export function Step5Report() {
         </table>
       </div>
 
-      {/* Failures And Skips */}
+      {/* Already-existed skipped records — info panel */}
+      {totalSkipped > 0 && (
+        <div className={styles.panel}>
+          <div className={styles.sectionTitle} style={{ marginBottom: '8px' }}>
+            Records already existed — skipped ({totalSkipped})
+          </div>
+          <MessageBar intent="info">
+            <MessageBarBody>
+              {totalSkipped} record{totalSkipped !== 1 ? 's' : ''} already existed in the target environment and were left unchanged.
+              {' '}If this is unexpected, a previous run may have partially completed.
+            </MessageBarBody>
+          </MessageBar>
+          {importResults.filter(r => (r.skipped ?? 0) > 0).map(r => (
+            <div key={r.entity} className={styles.muted} style={{ marginTop: '6px' }}>
+              {r.entity}: {r.skipped} skipped
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Failures grouped by error class */}
       <div className={styles.panel}>
         <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
-          <div className={styles.sectionTitle}>Failures And Skips</div>
+          <div className={styles.sectionTitle}>Import Failures ({totalFailed})</div>
           <Button size="small" onClick={exportErrors} disabled={allErrors.length === 0}>Export errors CSV</Button>
         </div>
-        <table className={styles.table}>
-          <thead>
-            <tr>
-              <th className={styles.th}>Entity</th>
-              <th className={styles.th}>Source ID</th>
-              <th className={styles.th}>Message</th>
-              <th className={styles.th}>Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {allErrors.map((error, idx) => (
-              <tr key={`${error.entity}-${error.sourceId}-${idx}`}>
-                <td className={styles.td}>{error.entity}</td>
-                <td className={`${styles.td} ${styles.code}`}>{error.sourceId}</td>
-                <td className={`${styles.td} ${styles.errorMessage}`}>{error.message}</td>
-                <td className={styles.td}>{new Date(error.timestamp).toLocaleString()}</td>
-              </tr>
-            ))}
-            {allErrors.length === 0 && (
-              <tr><td className={styles.td} colSpan={4}>No failures or skipped records.</td></tr>
-            )}
-          </tbody>
-        </table>
+        {allErrors.length === 0 ? (
+          <MessageBar intent="success">
+            <MessageBarBody>No import failures.</MessageBarBody>
+          </MessageBar>
+        ) : (
+          errorGroups.map(group => {
+            const classKey = group.errorClass
+            const classExpanded = expandedGroups.has(classKey)
+            return (
+              <div key={classKey} style={{ marginBottom: '12px' }}>
+                {/* Error class header */}
+                <div
+                  style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', padding: '6px 0', borderBottom: `1px solid ${tokens.colorNeutralStroke2}` }}
+                  onClick={() => toggleGroup(classKey)}
+                >
+                  <span style={{ fontSize: '13px', fontWeight: '600', color: tokens.colorNeutralForeground1 }}>
+                    {group.label}
+                  </span>
+                  <span className={styles.muted}>({group.total})</span>
+                  <span className={styles.muted} style={{ marginLeft: 'auto' }}>{classExpanded ? '▲' : '▼'}</span>
+                </div>
+
+                {/* Per-project sub-groups */}
+                {classExpanded && group.projectGroups.map(pg => {
+                  const projectKey = `${classKey}::${pg.projectId}`
+                  const projectExpanded = expandedGroups.has(projectKey)
+                  return (
+                    <div key={projectKey} style={{ marginLeft: '16px', marginTop: '6px' }}>
+                      <div
+                        style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '4px 0' }}
+                        onClick={() => toggleGroup(projectKey)}
+                      >
+                        <span style={{ fontSize: '12px', color: tokens.colorNeutralForeground2 }}>
+                          {pg.projectName}
+                        </span>
+                        <span className={styles.muted}>— {pg.errors.length} error{pg.errors.length !== 1 ? 's' : ''}</span>
+                        <span className={styles.muted} style={{ marginLeft: 'auto' }}>{projectExpanded ? '▲' : '▼'}</span>
+                      </div>
+                      {projectExpanded && (
+                        <table className={styles.table} style={{ marginTop: '4px' }}>
+                          <thead>
+                            <tr>
+                              <th className={styles.th}>Entity</th>
+                              <th className={styles.th}>Source ID</th>
+                              <th className={styles.th}>Message</th>
+                              <th className={styles.th}>Time</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pg.errors.map((error: ImportError, idx: number) => (
+                              <tr key={`${error.entity}-${error.sourceId}-${idx}`}>
+                                <td className={styles.td}>{error.entity}</td>
+                                <td className={`${styles.td} ${styles.code}`}>{error.sourceId}</td>
+                                <td className={`${styles.td} ${styles.errorMessage}`}>{error.message}</td>
+                                <td className={styles.td}>{new Date(error.timestamp).toLocaleString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })
+        )}
       </div>
       </>
       )}
@@ -433,6 +569,7 @@ export function Step5Report() {
 
       <div className={styles.footer}>
         <Button onClick={prevStep}>{migrationMode === 'schemaOnly' ? 'Back to Schema Creation' : 'Back to Import'}</Button>
+        <Button appearance="primary" onClick={handleNextBatch}>Migrate Next Batch</Button>
         <Button onClick={handleStartNew}>Start New Migration</Button>
       </div>
     </div>

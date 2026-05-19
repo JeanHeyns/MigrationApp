@@ -249,12 +249,15 @@ export function Step4Import() {
   }
 
   function makeResult(entity: string, totalRows: number, errors: ImportError[]): ImportResult {
+    const realErrors = errors.filter(e => e.errorClass !== 'AlreadyExists')
+    const skipped = errors.length - realErrors.length
     return {
       entity,
       total: totalRows,
-      succeeded: totalRows - errors.length,
-      failed: errors.length,
-      errors,
+      succeeded: totalRows - realErrors.length - skipped,
+      failed: realErrors.length,
+      skipped,
+      errors: realErrors,
     }
   }
 

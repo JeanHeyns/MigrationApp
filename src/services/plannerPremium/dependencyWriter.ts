@@ -1,7 +1,7 @@
 import type { PoDependencyType, PoTaskDependency } from '../../models/projectOnline.types'
 import type { ImportError } from '../../models/plannerPremium.types'
 import { chunks, nowError } from './importHelpers'
-import { createOperationSet, executeOperationSet, queueScheduleCreate } from './scheduleApi'
+import { executeOperationSetWithRetry } from './scheduleApi'
 
 export interface DependencyWriteResult {
   poDependencyId: string
@@ -33,7 +33,7 @@ export async function writeDependencies(
         const result = {
           poDependencyId: dependency.DependencyId,
           success: false,
-          error: nowError('Dependency', dependency.DependencyId, 'Project was not imported'),
+          error: nowError('Dependency', dependency.DependencyId, 'Project was not imported', undefined, poProjectId),
         }
         results.push(result)
         onProgress?.(result)
@@ -50,7 +50,24 @@ export async function writeDependencies(
           const result = {
             poDependencyId: dependency.DependencyId,
             success: false,
-            error: nowError('Dependency', dependency.DependencyId, 'Predecessor or successor task was not imported'),
+            error: nowError('Dependency', dependency.DependencyId, 'Predecessor or successor task was not imported', 'PredecessorMissing', poProjectId),
+          }
+          results.push(result)
+          onProgress?.(result)
+          return false
+        }
+
+        if (dependency.DependencyType && dependency.DependencyType !== 'FS') {
+          const result = {
+            poDependencyId: dependency.DependencyId,
+            success: false,
+            error: nowError(
+              'Dependency',
+              dependency.DependencyId,
+              `Dependency type '${dependency.DependencyType}' is not supported — Planner Premium only allows Finish-to-Start (FS). A Microsoft Project Plan P3 or higher license is required to use other dependency types.`,
+              'NonFSDependency',
+              poProjectId,
+            ),
           }
           results.push(result)
           onProgress?.(result)
@@ -62,14 +79,12 @@ export async function writeDependencies(
 
       if (creatable.length === 0) continue
 
-      const operationSetId = await createOperationSet(projectId, `Project Online dependency import ${new Date().toISOString()}`)
-      let queued = 0
-      const queuedResults: DependencyWriteResult[] = []
-
-      for (const dependency of creatable) {
-        try {
-          const dependencyId = crypto.randomUUID()
-          await queueScheduleCreate(operationSetId, {
+      const ops = creatable.map(dependency => {
+        const dependencyId = crypto.randomUUID()
+        return {
+          id: dependency.DependencyId,
+          dvId: dependencyId,
+          entity: {
             '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_projecttaskdependency',
             msdyn_projecttaskdependencyid: dependencyId,
             msdyn_projecttaskdependencylinktype: LINK_TYPE_VALUES[dependency.DependencyType ?? 'FS'],
@@ -78,34 +93,36 @@ export async function writeDependencies(
             'msdyn_Project@odata.bind': `/msdyn_projects(${projectId})`,
             'msdyn_PredecessorTask@odata.bind': `/msdyn_projecttasks(${taskIdMap[dependency.PredecessorTaskId]})`,
             'msdyn_SuccessorTask@odata.bind': `/msdyn_projecttasks(${taskIdMap[dependency.SuccessorTaskId]})`,
-          })
-          queued += 1
-          queuedResults.push({ poDependencyId: dependency.DependencyId, dvDependencyId: dependencyId, success: true })
-        } catch (e) {
-          const result = { poDependencyId: dependency.DependencyId, success: false, error: nowError('Dependency', dependency.DependencyId, String(e)) }
-          results.push(result)
-          onProgress?.(result)
+          } as Record<string, unknown>,
         }
+      })
+
+      const dvIdByPoId = Object.fromEntries(ops.map(o => [o.id, o.dvId]))
+
+      const batchResult = await executeOperationSetWithRetry(
+        projectId,
+        ops.map(o => ({ id: o.id, entity: o.entity })),
+        `Project Online dependency import ${new Date().toISOString()}`,
+      )
+
+      for (const op of batchResult.succeeded) {
+        const result: DependencyWriteResult = {
+          poDependencyId: op.id,
+          dvDependencyId: dvIdByPoId[op.id],
+          success: true,
+        }
+        results.push(result)
+        onProgress?.(result)
       }
 
-      if (queued > 0) {
-        try {
-          await executeOperationSet(operationSetId)
-          for (const result of queuedResults) {
-            results.push(result)
-            onProgress?.(result)
-          }
-        } catch (e) {
-          for (const result of queuedResults) {
-            const failed = {
-              poDependencyId: result.poDependencyId,
-              success: false,
-              error: nowError('Dependency', result.poDependencyId, String(e)),
-            }
-            results.push(failed)
-            onProgress?.(failed)
-          }
+      for (const { op, reason, errorClass } of batchResult.failed) {
+        const result: DependencyWriteResult = {
+          poDependencyId: op.id,
+          success: false,
+          error: nowError('Dependency', op.id, reason, errorClass, poProjectId),
         }
+        results.push(result)
+        onProgress?.(result)
       }
     }
   }

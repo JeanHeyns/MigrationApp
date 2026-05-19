@@ -1,7 +1,36 @@
-import { listRecords, createRecord, updateRecord, performUnboundAction } from '../dataverseService'
+import { listRecords, createRecord, updateRecord, performUnboundAction as _performUnboundAction } from '../dataverseService'
 import type { DvSolution, DvSystemUser } from '../../models/plannerPremium.types'
+import { classifyDataverseError } from './errorClassifier'
 
-export { listRecords, createRecord, updateRecord, performUnboundAction }
+export { listRecords, createRecord, updateRecord }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      const cls = classifyDataverseError(err)
+      if ((cls !== 'Timeout' && cls !== 'Throttled') || attempt === maxAttempts) throw err
+      const baseDelay = cls === 'Throttled' ? 10000 : 2000
+      const delay = baseDelay * Math.pow(2.5, attempt - 1)
+      await sleep(delay + Math.random() * 500)
+    }
+  }
+  throw lastErr
+}
+
+export async function performUnboundAction(
+  actionName: string,
+  item?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return withRetry(() => _performUnboundAction(actionName, item))
+}
 
 export async function fetchSystemUsers(): Promise<DvSystemUser[]> {
   const rows = await listRecords(
