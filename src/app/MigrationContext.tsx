@@ -1,8 +1,10 @@
 import React, { createContext, useCallback, useContext, useState } from 'react'
 import type { PoFetchedData } from '../models/projectOnline.types'
 import type { MappingConfiguration, OptionSetMapping } from '../models/mapping.types'
-import type { DvSolution, ImportResult, LogEntry, ProjectWriteDiagnostic } from '../models/plannerPremium.types'
+import type { AssociationAttempt, DvSolution, ImportResult, LogEntry, ProjectWriteDiagnostic } from '../models/plannerPremium.types'
 import type { MigrationMode, SchemaCreationResults, SchemaSnapshot, ResolverPlan, SkippedFieldInstance } from '../models/dataOnly.types'
+import type { WorkHourTemplate, ScheduleModeOption, ProjectDefaults, ProjectOverride } from '../types/projectDefaults'
+import { DEFAULT_PROJECT_DEFAULTS } from '../types/projectDefaults'
 import { clearDataverseOrgUrl, setDataverseOrgUrl } from '../config/environment'
 
 export interface ProjectFilter {
@@ -89,11 +91,16 @@ interface MigrationState {
   resolverPlan: ResolverPlan | null
   skippedFieldInstances: SkippedFieldInstance[]
   projectWriteDiagnostics: ProjectWriteDiagnostic[]
+  associationDiagnostics: AssociationAttempt[]
   schemaCreationResults: SchemaCreationResults | null
   migrationScope: MigrationScope
   importProgress: ImportProgress | null
   stopRequested: boolean
   importWasStopped: boolean
+  workHourTemplates: WorkHourTemplate[]
+  scheduleModeOptions: ScheduleModeOption[]
+  projectDefaults: ProjectDefaults
+  projectOverrides: Map<string, ProjectOverride>
 }
 
 interface MigrationActions {
@@ -127,6 +134,8 @@ interface MigrationActions {
   clearSkippedFieldInstances: () => void
   addProjectWriteDiagnostics: (diagnostics: ProjectWriteDiagnostic[]) => void
   clearProjectWriteDiagnostics: () => void
+  addAssociationDiagnostics: (diagnostics: AssociationAttempt[]) => void
+  clearAssociationDiagnostics: () => void
   setSchemaCreationResults: (results: SchemaCreationResults | null) => void
   resetState: () => void
   setMigrationScope: (partial: Partial<Omit<MigrationScope, 'projects'>>) => void
@@ -136,6 +145,12 @@ interface MigrationActions {
   requestStop: () => void
   clearStopRequest: () => void
   setImportWasStopped: (value: boolean) => void
+  setWorkHourTemplates: (templates: WorkHourTemplate[]) => void
+  setScheduleModeOptions: (options: ScheduleModeOption[]) => void
+  setProjectDefaults: (defaults: ProjectDefaults) => void
+  setProjectOverride: (override: ProjectOverride) => void
+  clearProjectOverride: (projectId: string) => void
+  clearAllProjectOverrides: () => void
 }
 
 type MigrationContextType = MigrationState & MigrationActions
@@ -163,11 +178,16 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [resolverPlan, setResolverPlan] = useState<ResolverPlan | null>(null)
   const [skippedFieldInstances, setSkippedFieldInstances] = useState<SkippedFieldInstance[]>([])
   const [projectWriteDiagnostics, setProjectWriteDiagnostics] = useState<ProjectWriteDiagnostic[]>([])
+  const [associationDiagnostics, setAssociationDiagnostics] = useState<AssociationAttempt[]>([])
   const [schemaCreationResults, setSchemaCreationResults] = useState<SchemaCreationResults | null>(null)
   const [migrationScope, setMigrationScopeState] = useState<MigrationScope>(DEFAULT_MIGRATION_SCOPE)
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   const [stopRequested, setStopRequested] = useState(false)
   const [importWasStopped, setImportWasStopped] = useState(false)
+  const [workHourTemplates, setWorkHourTemplatesState] = useState<WorkHourTemplate[]>([])
+  const [scheduleModeOptions, setScheduleModeOptionsState] = useState<ScheduleModeOption[]>([])
+  const [projectDefaults, setProjectDefaultsState] = useState<ProjectDefaults>(DEFAULT_PROJECT_DEFAULTS)
+  const [projectOverrides, setProjectOverridesState] = useState<Map<string, ProjectOverride>>(new Map())
 
   const setMigrationMode = useCallback((mode: MigrationMode) => {
     setMigrationModeState(mode)
@@ -225,6 +245,10 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setProjectWriteDiagnostics(prev => [...prev, ...diagnostics]), [])
   const clearProjectWriteDiagnostics = useCallback(() => setProjectWriteDiagnostics([]), [])
 
+  const addAssociationDiagnostics = useCallback((diagnostics: AssociationAttempt[]) =>
+    setAssociationDiagnostics(prev => [...prev, ...diagnostics]), [])
+  const clearAssociationDiagnostics = useCallback(() => setAssociationDiagnostics([]), [])
+
   const setMigrationScope = useCallback((partial: Partial<Omit<MigrationScope, 'projects'>>) => {
     setMigrationScopeState(prev => {
       let tasks = partial.tasks ?? prev.tasks
@@ -268,6 +292,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setResolverPlan(null)
     setSkippedFieldInstances([])
     setProjectWriteDiagnostics([])
+    setAssociationDiagnostics([])
     setSchemaCreationResults(null)
     setImportProgress(null)
     setStopRequested(false)
@@ -306,6 +331,25 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const requestStop = useCallback(() => setStopRequested(true), [])
   const clearStopRequest = useCallback(() => setStopRequested(false), [])
 
+  const setWorkHourTemplates = useCallback((templates: WorkHourTemplate[]) => setWorkHourTemplatesState(templates), [])
+  const setScheduleModeOptions = useCallback((options: ScheduleModeOption[]) => setScheduleModeOptionsState(options), [])
+  const setProjectDefaults = useCallback((defaults: ProjectDefaults) => setProjectDefaultsState(defaults), [])
+  const setProjectOverride = useCallback((override: ProjectOverride) => {
+    setProjectOverridesState(prev => {
+      const next = new Map(prev)
+      next.set(override.projectId, override)
+      return next
+    })
+  }, [])
+  const clearProjectOverride = useCallback((projectId: string) => {
+    setProjectOverridesState(prev => {
+      const next = new Map(prev)
+      next.delete(projectId)
+      return next
+    })
+  }, [])
+  const clearAllProjectOverrides = useCallback(() => setProjectOverridesState(new Map()), [])
+
   const resetState = useCallback(() => {
     setCurrentStep(1)
     setPwaUrl('')
@@ -324,11 +368,16 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setResolverPlan(null)
     setSkippedFieldInstances([])
     setProjectWriteDiagnostics([])
+    setAssociationDiagnostics([])
     setSchemaCreationResults(null)
     setMigrationScopeState(DEFAULT_MIGRATION_SCOPE)
     setImportProgress(null)
     setStopRequested(false)
     setImportWasStopped(false)
+    setWorkHourTemplatesState([])
+    setScheduleModeOptionsState([])
+    setProjectDefaultsState(DEFAULT_PROJECT_DEFAULTS)
+    setProjectOverridesState(new Map())
     try { localStorage.removeItem('DEBUG_DATAONLY_WRITER') } catch { /* ignore */ }
   }, [])
 
@@ -339,8 +388,9 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       fetchedData, selectedProjectIds, projectFilter,
       mappingConfig, optionSetMappings, importResults, logs,
       migrationMode, schemaSnapshot, resolverPlan, schemaCreationResults,
-      skippedFieldInstances, projectWriteDiagnostics,
+      skippedFieldInstances, projectWriteDiagnostics, associationDiagnostics,
       migrationScope, importProgress, stopRequested, importWasStopped,
+      workHourTemplates, scheduleModeOptions, projectDefaults, projectOverrides,
       setCurrentStep, nextStep, prevStep, setPwaUrl,
       setResolvedDataverseUrl, setDataverseUrlError, clearResolvedDataverseUrl,
       setDataSource,
@@ -353,9 +403,12 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       setMigrationMode, setSchemaSnapshot, setResolverPlan,
       addSkippedFieldInstances, clearSkippedFieldInstances,
       addProjectWriteDiagnostics, clearProjectWriteDiagnostics,
+      addAssociationDiagnostics, clearAssociationDiagnostics,
       setSchemaCreationResults, resetState,
       setMigrationScope, startImport, completeProject, clearImportProgress,
       requestStop, clearStopRequest, setImportWasStopped,
+      setWorkHourTemplates, setScheduleModeOptions, setProjectDefaults,
+      setProjectOverride, clearProjectOverride, clearAllProjectOverrides,
     }}>
       {children}
     </MigrationContext.Provider>

@@ -2,6 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Button,
   Checkbox,
+  Dialog,
+  DialogSurface,
+  DialogTitle,
+  DialogBody,
+  DialogContent,
+  DialogActions,
+  Field,
+  Input,
   MessageBar,
   MessageBarBody,
   ProgressBar,
@@ -10,6 +18,7 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components'
+import { SettingsRegular } from '@fluentui/react-icons'
 import { useMigration, isFilterActive } from '../../app/MigrationContext'
 import { BulkActions } from '../../components/ProjectSelection/BulkActions'
 import { FilterBar } from '../../components/ProjectSelection/FilterBar'
@@ -25,11 +34,13 @@ import { writeDependencies } from '../../services/plannerPremium/dependencyWrite
 import type { DependencyWriteResult } from '../../services/plannerPremium/dependencyWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
 import type { AssignmentWriteResult } from '../../services/plannerPremium/assignmentWriter'
-import { buildResolverMap, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
-import type { FieldResolver } from '../../services/plannerPremium/resolverFactory'
+import { buildResolverMap, buildMultiLookupResolverDataOnly, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
+import type { FieldResolver, ResolverBuildWarning } from '../../services/plannerPremium/resolverFactory'
 import type { ImportError, ImportResult } from '../../models/plannerPremium.types'
 import type { PoTask } from '../../models/projectOnline.types'
 import type { SkippedFieldInstance } from '../../models/dataOnly.types'
+import type { ProjectOverride } from '../../types/projectDefaults'
+import { effectiveSettings } from '../../utils/effectiveProjectSettings'
 import { getConcurrencyLimit, runWithConcurrency } from '../../services/plannerPremium/concurrency'
 import { useBrowserCloseGuard } from '../../hooks/useBrowserCloseGuard'
 
@@ -103,15 +114,28 @@ export function Step4Import() {
     migrationMode, resolverPlan,
     addSkippedFieldInstances, clearSkippedFieldInstances,
     addProjectWriteDiagnostics, clearProjectWriteDiagnostics,
+    addAssociationDiagnostics, clearAssociationDiagnostics,
     addLog, setCurrentStep,
     migrationScope,
     importProgress, startImport, completeProject, clearImportProgress,
     requestStop, clearStopRequest, setImportWasStopped,
   } = useMigration()
 
-  const { selectedProjectIds, toggleProjectSelection, projectFilter } = useMigration()
+  const {
+    selectedProjectIds, toggleProjectSelection, projectFilter,
+    workHourTemplates, scheduleModeOptions, projectDefaults, projectOverrides,
+    setProjectOverride, clearProjectOverride,
+  } = useMigration()
   const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
   const [projectOwnerMap, setProjectOwnerMap] = useState<Record<string, string>>({})
+
+  // ── Per-project override modal state ─────────────────────────────────────
+  const [overrideModalId, setOverrideModalId] = useState<string | null>(null)
+  const [overrideEnabled, setOverrideEnabled] = useState(false)
+  const [overrideDraft, setOverrideDraft] = useState<Omit<ProjectOverride, 'projectId'>>({})
+  const [overrideHpdError, setOverrideHpdError] = useState<string | null>(null)
+  const [overrideHpwError, setOverrideHpwError] = useState<string | null>(null)
+  const [overrideDpmError, setOverrideDpmError] = useState<string | null>(null)
   const [phase, setPhase] = useState<Phase>('Ready')
   const [running, setRunning] = useState(false)
   const [logLines, setLogLines] = useState<string[]>([])
@@ -228,6 +252,36 @@ export function Step4Import() {
     return sortDir === 'asc' ? ' ▲' : ' ▼'
   }
 
+  function openOverrideModal(projectId: string) {
+    const existing = projectOverrides.get(projectId)
+    setOverrideEnabled(!!existing)
+    const eff = effectiveSettings(projectId, projectDefaults, projectOverrides)
+    setOverrideDraft({
+      workHourTemplateId: eff.workHourTemplateId,
+      workHourTemplateName: eff.workHourTemplateName,
+      scheduleMode: eff.scheduleMode,
+      hoursPerDay: eff.hoursPerDay,
+      hoursPerWeek: eff.hoursPerWeek,
+      daysPerMonth: eff.daysPerMonth,
+    })
+    setOverrideHpdError(null)
+    setOverrideHpwError(null)
+    setOverrideDpmError(null)
+    setOverrideModalId(projectId)
+  }
+
+  function saveOverrideModal() {
+    if (!overrideModalId) return
+    if (overrideEnabled) {
+      setProjectOverride({ projectId: overrideModalId, ...overrideDraft })
+    } else {
+      clearProjectOverride(overrideModalId)
+    }
+    setOverrideModalId(null)
+  }
+
+  const overrideCount = projectOverrides.size
+
   if (!fetchedData || !mappingConfig) {
     return (
       <div className={styles.root}>
@@ -282,6 +336,7 @@ export function Step4Import() {
     clearImportResults()
     clearSkippedFieldInstances()
     clearProjectWriteDiagnostics()
+    clearAssociationDiagnostics()
     clearStopRequest()
     clearImportProgress()
     stopRequestedRef.current = false
@@ -318,6 +373,22 @@ export function Step4Import() {
           appendLog(`[Resolver ${w.severity.toUpperCase()}] ${w.field}: ${w.message}`)
           addLog({ level: w.severity === 'error' ? 'error' : 'warning', message: `Resolver build — ${w.field}: ${w.message}` })
         }
+
+        // Build multi-lookup resolvers for N:N fields (MultiChoice handled by buildResolverMap)
+        const mlWarnings: ResolverBuildWarning[] = []
+        for (const mlMapping of (mappingConfig?.multiLookups ?? [])) {
+          if (mlMapping.targetShape === 'MultiChoice') continue
+          try {
+            const mlResolver = await buildMultiLookupResolverDataOnly(mlMapping, mlWarnings)
+            resolvers.set(mlMapping.poFieldName, mlResolver)
+          } catch (e) {
+            appendLog(`[Resolver ERROR] ${mlMapping.poFieldName}: ${String(e)}`)
+          }
+        }
+        for (const w of mlWarnings) {
+          appendLog(`[Resolver ${w.severity.toUpperCase()}] ${w.field}: ${w.message}`)
+        }
+
         appendLog(`Resolvers ready: ${resolvers.size} field(s)`)
       } catch (e) {
         setFatalError(`Failed to build resolvers: ${String(e)}`)
@@ -361,9 +432,11 @@ export function Step4Import() {
           const projectResults = await writeProjects([project], config, optionSetMappings, r => {
             setCompleted(c => c + 1)
             appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} project${r.error ? `: ${r.error.message}` : ''}${r.skippedFields?.length ? ` (${r.skippedFields.length} field(s) skipped)` : ''}`)
-          }, resolvers, projectOwnerMap)
+          }, resolvers, projectOwnerMap, projectDefaults, projectOverrides)
           allProjectResults.push(...projectResults)
           addProjectWriteDiagnostics(projectResults.flatMap(r => r.diagnostic ? [r.diagnostic] : []))
+          const assocDiags = projectResults.flatMap(r => r.associationDiagnostics ?? [])
+          if (assocDiags.length > 0) addAssociationDiagnostics(assocDiags)
 
           if (isDataOnly) {
             const skipped: SkippedFieldInstance[] = projectResults.flatMap(r =>
@@ -444,6 +517,10 @@ export function Step4Import() {
       // Aggregate results for Step 5 report
       addImportResult(makeResult('Resources', resourceResults.length, resourceResults.flatMap(r => r.error ? [r.error] : [])))
       addImportResult(makeResult('Projects', allProjectResults.length, allProjectResults.flatMap(r => r.error ? [r.error] : [])))
+      const totalAssociations = allProjectResults.reduce((sum, r) => sum + (r.associationsCreated ?? 0), 0)
+      if (totalAssociations > 0) {
+        addImportResult({ entity: 'Associations', total: totalAssociations, succeeded: totalAssociations, failed: 0, skipped: 0, errors: [] })
+      }
       addImportResult(makeResult('Team members', allTeamResults.length, allTeamResults.flatMap(r => r.error ? [r.error] : [])))
       if (migrationScope.tasks) {
         addImportResult(makeResult('Tasks', allTaskResults.length, allTaskResults.flatMap(r => r.error ? [r.error] : [])))
@@ -524,6 +601,7 @@ export function Step4Import() {
         {isFilterActive(projectFilter) ? ` · showing ${filteredProjects.length} filtered` : ''}
         {migrationScope.tasks ? ` · ${selectedTasks.length} tasks` : ''}
         {migrationScope.assignments ? ` · ${selectedAssignments.length} assignments` : ''}
+        {overrideCount > 0 ? ` · ${overrideCount} of ${data.projects.length} projects have overrides` : ''}
       </span>
 
       <div className={styles.panel}>
@@ -535,6 +613,7 @@ export function Step4Import() {
               <th className={styles.thSortable} onClick={() => handleSort('start')}>Start{sortIndicator('start')}</th>
               <th className={styles.thSortable} onClick={() => handleSort('finish')}>Finish{sortIndicator('finish')}</th>
               <th className={styles.thSortable} onClick={() => handleSort('owner')}>Owner / Project Manager{sortIndicator('owner')}</th>
+              <th className={styles.th} style={{ width: '36px' }} title="Working time overrides"></th>
             </tr>
           </thead>
           <tbody>
@@ -562,6 +641,16 @@ export function Step4Import() {
                       <option key={u.systemuserid} value={u.systemuserid}>{u.fullname}</option>
                     ))}
                   </Select>
+                </td>
+                <td className={styles.td} style={{ textAlign: 'center' }}>
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    icon={<SettingsRegular style={{ color: projectOverrides.has(project.ProjectId) ? tokens.colorBrandForeground1 : undefined }} />}
+                    disabled={running}
+                    title="Working time override"
+                    onClick={() => openOverrideModal(project.ProjectId)}
+                  />
                 </td>
               </tr>
             ))}
@@ -635,6 +724,105 @@ export function Step4Import() {
           </Button>
         </div>
       </div>
+
+      {/* ── Per-project working time override modal ── */}
+      <Dialog open={overrideModalId !== null} onOpenChange={(_, s) => { if (!s.open) setOverrideModalId(null) }}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>
+              Working time for &ldquo;{data.projects.find(p => p.ProjectId === overrideModalId)?.ProjectName ?? overrideModalId}&rdquo;
+            </DialogTitle>
+            <DialogContent>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingTop: '8px' }}>
+                <Checkbox
+                  checked={overrideEnabled}
+                  label="Override defaults for this project"
+                  onChange={(_, d) => setOverrideEnabled(!!d.checked)}
+                />
+
+                <Field label="Work hour template">
+                  <Select
+                    disabled={!overrideEnabled}
+                    value={overrideDraft.workHourTemplateId ?? ''}
+                    onChange={(_, d) => {
+                      const tpl = workHourTemplates.find(t => t.id === d.value) ?? null
+                      setOverrideDraft(prev => ({ ...prev, workHourTemplateId: tpl?.id ?? null, workHourTemplateName: tpl?.name ?? null }))
+                    }}
+                  >
+                    {workHourTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </Select>
+                </Field>
+
+                <Field label="Schedule mode">
+                  <Select
+                    disabled={!overrideEnabled}
+                    value={overrideDraft.scheduleMode !== null && overrideDraft.scheduleMode !== undefined ? String(overrideDraft.scheduleMode) : ''}
+                    onChange={(_, d) => {
+                      const val = d.value ? parseInt(d.value, 10) : null
+                      setOverrideDraft(prev => ({ ...prev, scheduleMode: isNaN(val as number) ? null : val }))
+                    }}
+                  >
+                    <option value="">— Dataverse default —</option>
+                    {scheduleModeOptions.map(o => <option key={o.value} value={String(o.value)}>{o.label}</option>)}
+                  </Select>
+                </Field>
+
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <Field label="Hours per day" validationMessage={overrideHpdError ?? undefined} validationState={overrideHpdError ? 'error' : 'none'}>
+                    <Input
+                      type="number"
+                      disabled={!overrideEnabled}
+                      style={{ width: '90px' }}
+                      value={String(overrideDraft.hoursPerDay ?? '')}
+                      onChange={e => {
+                        const n = parseFloat(e.target.value)
+                        setOverrideHpdError(isNaN(n) || n <= 0 || n > 24 ? 'Must be > 0 and ≤ 24' : null)
+                        setOverrideDraft(prev => ({ ...prev, hoursPerDay: isNaN(n) ? undefined : n }))
+                      }}
+                    />
+                  </Field>
+                  <Field label="Hours per week" validationMessage={overrideHpwError ?? undefined} validationState={overrideHpwError ? 'error' : 'none'}>
+                    <Input
+                      type="number"
+                      disabled={!overrideEnabled}
+                      style={{ width: '90px' }}
+                      value={String(overrideDraft.hoursPerWeek ?? '')}
+                      onChange={e => {
+                        const n = parseFloat(e.target.value)
+                        setOverrideHpwError(isNaN(n) || n <= 0 || n > 168 ? 'Must be > 0 and ≤ 168' : null)
+                        setOverrideDraft(prev => ({ ...prev, hoursPerWeek: isNaN(n) ? undefined : n }))
+                      }}
+                    />
+                  </Field>
+                  <Field label="Days per month" validationMessage={overrideDpmError ?? undefined} validationState={overrideDpmError ? 'error' : 'none'}>
+                    <Input
+                      type="number"
+                      disabled={!overrideEnabled}
+                      style={{ width: '90px' }}
+                      value={String(overrideDraft.daysPerMonth ?? '')}
+                      onChange={e => {
+                        const n = parseFloat(e.target.value)
+                        setOverrideDpmError(isNaN(n) || n <= 0 || n > 31 ? 'Must be > 0 and ≤ 31' : null)
+                        setOverrideDraft(prev => ({ ...prev, daysPerMonth: isNaN(n) ? undefined : n }))
+                      }}
+                    />
+                  </Field>
+                </div>
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setOverrideModalId(null)}>Cancel</Button>
+              <Button
+                appearance="primary"
+                disabled={overrideEnabled && !!(overrideHpdError || overrideHpwError || overrideDpmError)}
+                onClick={saveOverrideModal}
+              >
+                {overrideEnabled ? 'Save override' : 'Clear override'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import type { ResolverPlan, ResolverEntry, ColumnMetaType, GlobalOptionSetMeta } from '../../models/dataOnly.types'
-import type { FieldMapping, OptionSetMapping } from '../../models/mapping.types'
+import type { FieldMapping, MultiLookupMapping, OptionSetMapping } from '../../models/mapping.types'
 import { fetchEntityDefinition, fetchEntityManyToOneRelationships, listAllRecords, fetchGlobalOptionSetFull } from '../dataverseService'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -27,7 +27,8 @@ export interface ResolverResult {
   bindValue?: string            // e.g. "/cr123_categories(guid)"
   originalLabel?: string
   failureReason?: string
-  // Only set on unresolved multichoice with at least one matched label
+  /** N:N multi-lookup: GUIDs to associate after project PATCH */
+  associateGuids?: string[]
   partialResolution?: {
     resolvedLabels: string[]
     failedLabels: string[]
@@ -54,6 +55,8 @@ export interface ResolverFactoryDeps {
 
 const optionSetCache = new Map<string, GlobalOptionSetMeta>()
 const optionSetRequestCache = new Map<string, Promise<GlobalOptionSetMeta | null>>()
+// key: `${targetEntitySetName}:${matchFieldLogicalName}` → labelMap
+const multiLookupRecordCache = new Map<string, Map<string, string>>()
 
 function isDebug(): boolean {
   try { return localStorage.getItem('DEBUG_DATAONLY_WRITER') === '1' } catch { return false }
@@ -62,6 +65,7 @@ function isDebug(): boolean {
 export function clearResolverCaches(): void {
   optionSetCache.clear()
   optionSetRequestCache.clear()
+  multiLookupRecordCache.clear()
 }
 
 // ─── Full-mode passthrough resolver map ──────────────────────────────────────
@@ -74,13 +78,14 @@ export function clearResolverCaches(): void {
 export async function buildFullModeResolverMap(
   fieldMappings: FieldMapping[],
   optionSetMappings: OptionSetMapping[],
+  multiLookupMappings?: MultiLookupMapping[],
 ): Promise<Map<string, FieldResolver>> {
   const resolvers = new Map<string, FieldResolver>()
   for (const mapping of fieldMappings) {
     if (mapping.skip || !mapping.migrateValue) continue
     const fieldKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
     if (!fieldKey) continue
-    const resolver = await buildFullModeFieldResolver(mapping, optionSetMappings)
+    const resolver = await buildFullModeFieldResolver(mapping, optionSetMappings, multiLookupMappings)
     if (resolver) resolvers.set(fieldKey, resolver)
   }
   return resolvers
@@ -89,7 +94,18 @@ export async function buildFullModeResolverMap(
 async function buildFullModeFieldResolver(
   mapping: FieldMapping,
   optionSetMappings: OptionSetMapping[],
+  multiLookupMappings?: MultiLookupMapping[],
 ): Promise<FieldResolver | null> {
+  if (mapping.customField.CustomFieldType === 'LookupMulti') {
+    const fieldKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
+    const mlMapping = multiLookupMappings?.find(m => m.poFieldName === fieldKey)
+    const targetShape = mlMapping?.targetShape ?? 'N:N'  // legacy entries without targetShape → N:N
+    if (targetShape === 'N:N') {
+      if (mlMapping) return buildMultiLookupResolverFullMode(mapping, mlMapping)
+      return null
+    }
+    // targetShape === 'MultiChoice': fall through to MultiSelectOptionSet case below
+  }
   switch (mapping.targetColumnType) {
     case 'Boolean':
       return {
@@ -693,6 +709,178 @@ async function buildLookupResolver(entry: ResolverEntry, warnings: ResolverBuild
       }
     },
   }
+}
+
+// ─── MultiLookup resolver ─────────────────────────────────────────────────────
+
+function normalizeMultiLookupInput(raw: unknown, sourceMap?: Map<string, string>): string[] {
+  if (raw == null || raw === '') return []
+  const tokens: string[] = Array.isArray(raw)
+    ? raw.map(String).map(s => s.trim()).filter(Boolean)
+    : String(raw).split(/[;,|]/).map(t => t.trim()).filter(Boolean)
+
+  // Dedupe silently
+  const seen = new Set<string>()
+  const unique = tokens.filter(t => { if (seen.has(t)) return false; seen.add(t); return true })
+
+  if (!sourceMap) return unique
+  // Map PO GUIDs → labels; pass through non-GUID tokens unchanged
+  return unique.map(t => sourceMap.get(t) ?? t)
+}
+
+async function fetchMultiLookupLabelMap(
+  mapping: MultiLookupMapping,
+  warnings: ResolverBuildWarning[],
+): Promise<Map<string, string>> {
+  if (!mapping.targetEntitySetName || !mapping.matchFieldLogicalName || !mapping.targetEntityLogicalName) {
+    warnings.push({
+      severity: 'error',
+      field: mapping.poFieldName,
+      type: 'incomplete_resolver_metadata',
+      message: `N:N multi-lookup "${mapping.poFieldName}" missing target entity config (targetEntityLogicalName / targetEntitySetName / matchFieldLogicalName).`,
+    })
+    return new Map()
+  }
+  const cacheKey = `${mapping.targetEntitySetName}:${mapping.matchFieldLogicalName}`
+  const cached = multiLookupRecordCache.get(cacheKey)
+  if (cached) return cached
+
+  const idField = `${mapping.targetEntityLogicalName}id`
+  let records: Record<string, unknown>[]
+  try {
+    records = await listAllRecords(
+      mapping.targetEntitySetName,
+      [idField, mapping.matchFieldLogicalName],
+      { maxRecords: LARGE_TABLE_THRESHOLD + 1 },
+    )
+  } catch (e) {
+    warnings.push({
+      severity: 'error',
+      field: mapping.poFieldName,
+      type: 'lookup_fetch_failed',
+      message: `Failed to load lookup entity "${mapping.targetEntitySetName}" for multi-lookup field "${mapping.poFieldName}": ${String(e)}`,
+    })
+    return new Map()
+  }
+
+  if (records.length > LARGE_TABLE_THRESHOLD) {
+    warnings.push({
+      severity: 'warn',
+      field: mapping.poFieldName,
+      type: 'large_lookup_table',
+      message: `Lookup entity "${mapping.targetEntitySetName}" exceeds ${LARGE_TABLE_THRESHOLD} records. Only first ${LARGE_TABLE_THRESHOLD} used.`,
+    })
+    records = records.slice(0, LARGE_TABLE_THRESHOLD)
+  }
+
+  const labelMap = new Map<string, string>()
+  const duplicates = new Set<string>()
+
+  for (const r of records) {
+    const matchVal = normalize(String(r[mapping.matchFieldLogicalName] ?? ''))
+    if (!matchVal) continue
+    const id = String(r[idField] ?? '').replace(/[{}]/g, '')
+    if (!id) continue
+    if (labelMap.has(matchVal)) {
+      duplicates.add(matchVal)
+      continue
+    }
+    labelMap.set(matchVal, id)
+  }
+
+  if (duplicates.size > 0) {
+    warnings.push({
+      severity: 'warn',
+      field: mapping.poFieldName,
+      type: 'duplicate_lookup_name',
+      message: `Match field "${mapping.matchFieldLogicalName}" has ${duplicates.size} duplicate value(s) in "${mapping.targetEntitySetName}". First record wins per label.`,
+      details: [...duplicates],
+    })
+  }
+
+  multiLookupRecordCache.set(cacheKey, labelMap)
+  return labelMap
+}
+
+function buildMultiLookupResolverFromMap(
+  labelMap: Map<string, string>,
+  sourceMap?: Map<string, string>,
+): FieldResolver {
+  return {
+    fieldType: 'Lookup',
+    resolve: (poValue): ResolverResult => {
+      const labels = normalizeMultiLookupInput(poValue, sourceMap)
+      if (labels.length === 0) return { status: 'empty' }
+
+      const resolved: string[] = []
+      const failed: string[] = []
+      for (const label of labels) {
+        const guid = labelMap.get(normalize(label))
+        if (guid) resolved.push(guid)
+        else failed.push(label)
+      }
+
+      if (resolved.length === 0) {
+        return {
+          status: 'unresolved',
+          originalLabel: labels.join('; '),
+          partialResolution: { resolvedLabels: [], failedLabels: failed },
+        }
+      }
+
+      return {
+        status: 'resolved',
+        associateGuids: resolved,
+        ...(failed.length > 0 ? {
+          originalLabel: labels.join('; '),
+          partialResolution: {
+            resolvedLabels: labels.filter(l => !failed.includes(l)),
+            failedLabels: failed,
+          },
+        } : {}),
+      }
+    },
+  }
+}
+
+async function buildMultiLookupResolverFullMode(
+  mapping: FieldMapping,
+  mlMapping: MultiLookupMapping,
+): Promise<FieldResolver> {
+  const warnings: ResolverBuildWarning[] = []
+  const labelMap = await fetchMultiLookupLabelMap(mlMapping, warnings)
+
+  // Build sourceMap: PO GUID → PO label for input normalisation
+  const sourceMap = new Map<string, string>()
+  for (const entry of mapping.lookupTable?.entries ?? []) {
+    sourceMap.set(entry.LookupEntryUID, entry.LookupEntryFullValue ?? entry.LookupEntryValue ?? '')
+  }
+
+  return buildMultiLookupResolverFromMap(labelMap, sourceMap.size > 0 ? sourceMap : undefined)
+}
+
+export async function buildMultiLookupResolverDataOnly(
+  mlMapping: MultiLookupMapping,
+  warnings: ResolverBuildWarning[],
+): Promise<FieldResolver> {
+  if (mlMapping.targetShape === 'MultiChoice') return unresolvedResolver('Lookup')
+  const labelMap = await fetchMultiLookupLabelMap(mlMapping, warnings)
+
+  if (labelMap.size === 0 && warnings.some(w => w.type === 'lookup_fetch_failed')) {
+    return unresolvedResolver('Lookup')
+  }
+
+  if (labelMap.size === 0) {
+    warnings.push({
+      severity: 'error',
+      field: mlMapping.poFieldName,
+      type: 'lookup_fetch_failed',
+      message: `Match field "${mlMapping.matchFieldLogicalName}" is empty on all records in "${mlMapping.targetEntitySetName}". Cannot match PO labels.`,
+    })
+    return unresolvedResolver('Lookup')
+  }
+
+  return buildMultiLookupResolverFromMap(labelMap)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

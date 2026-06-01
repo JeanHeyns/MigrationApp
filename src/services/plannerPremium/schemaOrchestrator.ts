@@ -1,10 +1,12 @@
-import type { MappingConfiguration, OptionSetMapping } from '../../models/mapping.types'
+import type { MappingConfiguration, MultiLookupMapping, OptionSetMapping } from '../../models/mapping.types'
 import type { DvSolution } from '../../models/plannerPremium.types'
 import type { PoLookupTable } from '../../models/projectOnline.types'
 import type { SchemaCreationResults } from '../../models/dataOnly.types'
 import { createColumns, createMigrationColumns } from './columnManager'
 import { createOptionSets } from './choiceSetManager'
 import { ensureLookupEntity, insertLookupEntries, lookupEntityLogicalName, type LookupEntityResult } from './lookupEntityManager'
+import { classifyDataverseError } from './errorClassifier'
+import { createManyToManyRelationship, getEntityManyToManyRelationships } from '../dataverseService'
 
 export interface SchemaOrchestrationInput {
   mappingConfig: MappingConfiguration
@@ -16,6 +18,7 @@ export interface SchemaOrchestrationInput {
 
 export type SchemaOrchestrationResult = SchemaCreationResults & {
   optionSetMappings: OptionSetMapping[]
+  multiLookupMappings: MultiLookupMapping[]
 }
 
 function emptyResults(): SchemaCreationResults {
@@ -26,6 +29,7 @@ function emptyResults(): SchemaCreationResults {
     optionSets: { created: [], skipped: [], failed: [] },
     lookupEntities: { created: [], skipped: [], failed: [] },
     lookupEntries: { inserted: [], skipped: [], failed: [] },
+    nnRelationships: { created: [], skipped: [], failed: [] },
   }
 }
 
@@ -36,6 +40,19 @@ function isLookupBackedMapping(mappingConfig: MappingConfiguration, lookupTableU
     !m.useExistingLookupEntity &&
     m.lookupTable?.LookupTableUID === lookupTableUID
   )
+}
+
+function isNNMultiLookupField(mappingConfig: MappingConfiguration, poFieldName: string): boolean {
+  const mlMapping = mappingConfig.multiLookups?.find(ml => ml.poFieldName === poFieldName)
+  return !mlMapping || mlMapping.targetShape === 'N:N' || mlMapping.targetShape === undefined
+}
+
+function isMultiLookupBackedMapping(mappingConfig: MappingConfiguration, lookupTableUID: string): boolean {
+  return mappingConfig.fieldMappings.some(m => {
+    if (m.skip || m.customField.CustomFieldType !== 'LookupMulti' || m.lookupTable?.LookupTableUID !== lookupTableUID) return false
+    const poFieldName = m.customField.ODataFieldName || m.customField.CustomFieldName
+    return isNNMultiLookupField(mappingConfig, poFieldName)
+  })
 }
 
 export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput): Promise<SchemaOrchestrationResult> {
@@ -61,7 +78,10 @@ export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput)
     },
   )
 
-  const lookupTables = poLookupTables.filter(table => isLookupBackedMapping(mappingConfig, table.LookupTableUID))
+  const lookupTables = poLookupTables.filter(table =>
+    isLookupBackedMapping(mappingConfig, table.LookupTableUID) ||
+    isMultiLookupBackedMapping(mappingConfig, table.LookupTableUID)
+  )
   const lookupEntities = new Map<string, LookupEntityResult>()
 
   for (const table of lookupTables) {
@@ -97,6 +117,84 @@ export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput)
           error: entryResult.error ?? 'Unknown error',
         })
       }
+    }
+  }
+
+  // Process LookupMulti fields: create N:N relationships
+  const multiLookupMappings: MultiLookupMapping[] = []
+  const multiLookupFields = mappingConfig.fieldMappings.filter(m => {
+    if (m.skip || m.customField.CustomFieldType !== 'LookupMulti' || m.customField.CustomFieldEntityType !== 'Project') return false
+    const poFieldName = m.customField.ODataFieldName || m.customField.CustomFieldName
+    return isNNMultiLookupField(mappingConfig, poFieldName)
+  })
+
+  if (multiLookupFields.length > 0) {
+    onProgress('Creating N:N relationships for multi-value lookup fields...')
+
+    for (const mlField of multiLookupFields) {
+      const lookupTableUID = mlField.lookupTable?.LookupTableUID
+      if (!lookupTableUID) {
+        onProgress(`LookupMulti "${mlField.customField.CustomFieldName}": no lookup table — skipped`, 'warning')
+        continue
+      }
+
+      const entityResult = lookupEntities.get(lookupTableUID)
+      if (!entityResult || entityResult.status === 'failed') {
+        onProgress(`LookupMulti "${mlField.customField.CustomFieldName}": lookup entity not available — skipped`, 'warning')
+        continue
+      }
+
+      const targetLogicalName = entityResult.logicalName
+      const targetEntitySetName = entityResult.entitySetName
+      const nnSchemaName = `${publisherPrefix}_msdyn_project_${targetLogicalName}`.slice(0, 100)
+      const poFieldName = mlField.customField.ODataFieldName || mlField.customField.CustomFieldName
+
+      try {
+        await createManyToManyRelationship({
+          schemaName: nnSchemaName,
+          entity1LogicalName: 'msdyn_project',
+          entity2LogicalName: targetLogicalName,
+          entity1Label: 'Projects',
+          entity2Label: entityResult.displayName,
+          solutionUniqueName: selectedSolution.uniquename,
+        })
+        results.nnRelationships!.created.push({ schemaName: nnSchemaName, poField: poFieldName })
+        onProgress(`N:N relationship "${nnSchemaName}" created`, 'success')
+      } catch (err) {
+        const cls = classifyDataverseError(err)
+        if (cls === 'AlreadyExists') {
+          results.nnRelationships!.skipped.push({ schemaName: nnSchemaName, poField: poFieldName, reason: 'already exists' })
+          onProgress(`N:N relationship "${nnSchemaName}" already exists; reusing`, 'warning')
+        } else {
+          const errMsg = String(err)
+          results.nnRelationships!.failed.push({ schemaName: nnSchemaName, poField: poFieldName, error: errMsg })
+          onProgress(`N:N relationship "${nnSchemaName}" failed: ${errMsg}`, 'error')
+          continue
+        }
+      }
+
+      // Resolve the actual navigation property name from DV
+      let navigationPropertyName = nnSchemaName
+      try {
+        const nnRels = await getEntityManyToManyRelationships('msdyn_project')
+        const nnRel = nnRels.find(r => r.schemaName === nnSchemaName)
+        if (nnRel) {
+          navigationPropertyName = nnRel.entity1LogicalName === 'msdyn_project'
+            ? nnRel.entity2NavigationPropertyName
+            : nnRel.entity1NavigationPropertyName
+        }
+      } catch { /* fallback to schemaName */ }
+
+      multiLookupMappings.push({
+        poFieldName,
+        targetShape: 'N:N',
+        targetEntityLogicalName: targetLogicalName,
+        targetEntitySetName,
+        matchFieldLogicalName: entityResult.primaryNameField,
+        relationshipSchemaName: nnSchemaName,
+        navigationPropertyName,
+        relationshipType: 'pure-nn',
+      })
     }
   }
 
@@ -146,5 +244,5 @@ export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput)
   )
 
   results.completedAt = new Date()
-  return { ...results, optionSetMappings }
+  return { ...results, optionSetMappings, multiLookupMappings }
 }

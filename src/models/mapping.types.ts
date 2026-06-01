@@ -36,6 +36,24 @@ export interface FieldMapping {
   matchSource?: 'auto' | 'manual'  // dataOnly mode: how targetLogicalName was set
 }
 
+export type MultiLookupTargetShape = 'MultiChoice' | 'N:N'
+
+export interface MultiLookupMapping {
+  poFieldName: string
+  targetShape?: MultiLookupTargetShape     // undefined = legacy N:N
+
+  // N:N only
+  targetEntityLogicalName?: string
+  targetEntitySetName?: string
+  matchFieldLogicalName?: string
+  relationshipSchemaName?: string
+  navigationPropertyName?: string
+  relationshipType?: 'pure-nn'
+
+  // MultiChoice only
+  targetColumnLogicalName?: string
+}
+
 export interface OwnerMapping {
   poResourceUid: string
   poOwnerName: string
@@ -52,5 +70,6 @@ export interface MappingConfiguration {
   migrationMode?: MigrationMode
   fieldMappings: FieldMapping[]
   ownerMappings: OwnerMapping[]
+  multiLookups?: MultiLookupMapping[]
   savedAt: string
 }

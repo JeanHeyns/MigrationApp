@@ -28,9 +28,12 @@ import { fetchLookupTables } from '../../services/projectOnline/lookupTables'
 import { fetchSolutions } from '../../services/plannerPremium/dataverseClient'
 import { inspectSolution } from '../../services/plannerPremium/schemaInspector'
 import { parseWorkbook, generateTemplate } from '../../services/fileImportService'
+import { listWorkHourTemplates, pickInitialTemplate, findTemplateByName } from '../../services/plannerPremium/workHourTemplates'
+import { fetchScheduleModeOptions, clearScheduleModeCache, findScheduleModeByLabel } from '../../services/plannerPremium/scheduleMode'
 import type { PoFetchedData } from '../../models/projectOnline.types'
 import type { DvSolution } from '../../models/plannerPremium.types'
 import type { MigrationMode } from '../../models/dataOnly.types'
+import { DEFAULT_PROJECT_DEFAULTS } from '../../types/projectDefaults'
 
 const useStyles = makeStyles({
   root: {
@@ -290,6 +293,10 @@ export function Step1Connect() {
     migrationMode, setMigrationMode, schemaSnapshot, setSchemaSnapshot,
     fetchedData, setResolverPlan,
     migrationScope, setMigrationScope,
+    workHourTemplates, setWorkHourTemplates,
+    scheduleModeOptions, setScheduleModeOptions,
+    projectDefaults, setProjectDefaults,
+    setProjectOverride, clearAllProjectOverrides,
   } = useMigration()
 
   // ── Project Online state ─────────────────────────────────────────────────
@@ -316,12 +323,45 @@ export function Step1Connect() {
   const [scanPhase, setScanPhase] = useState<'idle' | 'scanning' | 'done' | 'error'>('idle')
   const [scanError, setScanError] = useState<string | null>(null)
 
+  // ── Work hour templates + schedule mode fetch ─────────────────────────────
+  const [whtLoading, setWhtLoading] = useState(false)
+  const [whtError, setWhtError] = useState<string | null>(null)
+  const [smLoading, setSmLoading] = useState(false)
+
+  // Numeric defaults local validation (bounds)
+  const [hpdError, setHpdError] = useState<string | null>(null)
+  const [hpwError, setHpwError] = useState<string | null>(null)
+  const [dpmError, setDpmError] = useState<string | null>(null)
+
   useEffect(() => {
     fetchSolutions()
       .then(setSolutions)
       .catch(e => setSolutionsError(String(e)))
       .finally(() => setSolutionsLoading(false))
   }, [])
+
+  // Resolve fileUploadProjectOverrides names → IDs once templates + modes are available
+  useEffect(() => {
+    const overrides = fetchedData?.fileUploadProjectOverrides
+    if (!overrides?.length || !workHourTemplates.length || !scheduleModeOptions.length) return
+    for (const raw of overrides) {
+      const resolved: Parameters<typeof setProjectOverride>[0] = { projectId: raw.projectId }
+      if (raw.workHourTemplateName) {
+        const tpl = findTemplateByName(workHourTemplates, raw.workHourTemplateName)
+        resolved.workHourTemplateId = tpl?.id ?? null
+        resolved.workHourTemplateName = raw.workHourTemplateName
+      }
+      if (raw.scheduleModeLabel) {
+        const opt = findScheduleModeByLabel(scheduleModeOptions, raw.scheduleModeLabel)
+        resolved.scheduleMode = opt?.value ?? null
+      }
+      if (raw.hoursPerDay !== undefined) resolved.hoursPerDay = raw.hoursPerDay
+      if (raw.hoursPerWeek !== undefined) resolved.hoursPerWeek = raw.hoursPerWeek
+      if (raw.daysPerMonth !== undefined) resolved.daysPerMonth = raw.daysPerMonth
+      setProjectOverride(resolved)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchedData?.fileUploadProjectOverrides, workHourTemplates, scheduleModeOptions])
 
   async function runScan() {
     if (!selectedSolution) return
@@ -474,6 +514,54 @@ export function Step1Connect() {
     URL.revokeObjectURL(url)
   }
 
+  async function fetchWorkingTimeMetadata() {
+    clearScheduleModeCache()
+    clearAllProjectOverrides()
+    setProjectDefaults(DEFAULT_PROJECT_DEFAULTS)
+
+    setWhtLoading(true)
+    setWhtError(null)
+    setSmLoading(true)
+
+    const [templatesResult, smResult] = await Promise.allSettled([
+      listWorkHourTemplates(),
+      fetchScheduleModeOptions(),
+    ])
+
+    let resolvedTemplateId: string | null = null
+    let resolvedTemplateName: string | null = null
+    let resolvedScheduleMode: number | null = null
+
+    if (templatesResult.status === 'fulfilled') {
+      setWorkHourTemplates(templatesResult.value)
+      const initial = pickInitialTemplate(templatesResult.value)
+      if (initial) {
+        resolvedTemplateId = initial.id
+        resolvedTemplateName = initial.name
+      }
+    } else {
+      setWhtError(String(templatesResult.reason))
+      setWorkHourTemplates([])
+    }
+    setWhtLoading(false)
+
+    if (smResult.status === 'fulfilled') {
+      setScheduleModeOptions(smResult.value)
+      const fixedDuration = smResult.value.find(
+        o => o.label.toLowerCase().includes('fixed duration') && !o.label.toLowerCase().includes('effort'),
+      )
+      if (fixedDuration) resolvedScheduleMode = fixedDuration.value
+    }
+    setSmLoading(false)
+
+    setProjectDefaults({
+      ...DEFAULT_PROJECT_DEFAULTS,
+      workHourTemplateId: resolvedTemplateId,
+      workHourTemplateName: resolvedTemplateName,
+      scheduleMode: resolvedScheduleMode,
+    })
+  }
+
   function handleSolutionChange(id: string) {
     const sol = solutions.find(s => s.solutionid === id) ?? null
     setSelectedSolution(sol)
@@ -487,6 +575,12 @@ export function Step1Connect() {
         text: 'Re-fetch needed: scan the newly selected target schema before continuing.',
         action: 'scan',
       })
+    }
+    if (sol) {
+      fetchWorkingTimeMetadata()
+    } else {
+      setWorkHourTemplates([])
+      setScheduleModeOptions([])
     }
   }
 
@@ -568,7 +662,11 @@ export function Step1Connect() {
   const sourceValid = dataSource === 'ProjectOnline'
     ? localUrl.trim().replace(/\/$/, '').startsWith('https://')
     : !!uploadedFile && !uploadParsing
+  const defaultsValid = !hpdError && !hpwError && !dpmError
+  const whtReady = migrationMode === 'schemaOnly' || dataSource === 'FileUpload'
+    || (!whtLoading && !smLoading && workHourTemplates.length > 0)
   const fetchButtonEnabled = !!migrationMode && sourceValid && !!selectedSolution && !isFetching
+    && defaultsValid && whtReady
   const needsRefetch = !!activeResult
     && migrationMode !== 'schemaOnly'
     && activeResult.projects.length === 0
@@ -583,6 +681,27 @@ export function Step1Connect() {
     }
     return activeResult.projects.length > 0
   })()
+
+  function handleHoursPerDayChange(val: string) {
+    const n = parseFloat(val)
+    const err = isNaN(n) || n <= 0 || n > 24 ? 'Must be > 0 and ≤ 24' : null
+    setHpdError(err)
+    if (!err) setProjectDefaults({ ...projectDefaults, hoursPerDay: n })
+  }
+
+  function handleHoursPerWeekChange(val: string) {
+    const n = parseFloat(val)
+    const err = isNaN(n) || n <= 0 || n > 168 ? 'Must be > 0 and ≤ 168' : null
+    setHpwError(err)
+    if (!err) setProjectDefaults({ ...projectDefaults, hoursPerWeek: n })
+  }
+
+  function handleDaysPerMonthChange(val: string) {
+    const n = parseFloat(val)
+    const err = isNaN(n) || n <= 0 || n > 31 ? 'Must be > 0 and ≤ 31' : null
+    setDpmError(err)
+    if (!err) setProjectDefaults({ ...projectDefaults, daysPerMonth: n })
+  }
 
   // Active preview data (either source)
   const previewItems: { label: string; count: number }[] = activeResult
@@ -816,6 +935,102 @@ export function Step1Connect() {
           </div>
         )}
       </div>
+
+      {/* ── Project defaults (hidden in schemaOnly) ── */}
+      {migrationMode !== 'schemaOnly' && selectedSolution && (
+        <div className={styles.sectionBox}>
+          <div className={styles.sectionTitle}>Project defaults</div>
+
+          {(whtLoading || smLoading) && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: tokens.colorNeutralForeground3 }}>
+              <Spinner size="tiny" /> Loading work hour templates and schedule modes…
+            </div>
+          )}
+
+          {whtError && (
+            <MessageBar intent="error">
+              <MessageBarBody>
+                Could not load work hour templates: {whtError}. Please create a work hour template in Project for the Web before continuing.
+              </MessageBarBody>
+            </MessageBar>
+          )}
+
+          {!whtLoading && !whtError && workHourTemplates.length === 0 && (
+            <MessageBar intent="error">
+              <MessageBarBody>
+                No work hour templates found in target. Please create one in Project for the Web before continuing.
+              </MessageBarBody>
+            </MessageBar>
+          )}
+
+          {!whtLoading && workHourTemplates.length > 0 && (
+            <>
+              <Field label="Work hour template">
+                <Select
+                  value={projectDefaults.workHourTemplateId ?? ''}
+                  onChange={(_, d) => {
+                    const tpl = workHourTemplates.find(t => t.id === d.value) ?? null
+                    setProjectDefaults({ ...projectDefaults, workHourTemplateId: tpl?.id ?? null, workHourTemplateName: tpl?.name ?? null })
+                  }}
+                >
+                  {workHourTemplates.map(t => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field label="Schedule mode">
+                <Select
+                  value={projectDefaults.scheduleMode !== null ? String(projectDefaults.scheduleMode) : ''}
+                  onChange={(_, d) => {
+                    const val = d.value ? parseInt(d.value, 10) : null
+                    setProjectDefaults({ ...projectDefaults, scheduleMode: isNaN(val as number) ? null : val })
+                  }}
+                >
+                  <option value="">— Dataverse default —</option>
+                  {scheduleModeOptions.map(o => (
+                    <option key={o.value} value={String(o.value)}>{o.label}</option>
+                  ))}
+                </Select>
+              </Field>
+
+              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                <Field label="Hours per day" validationMessage={hpdError ?? undefined} validationState={hpdError ? 'error' : 'none'}>
+                  <Input
+                    type="number"
+                    style={{ width: '100px' }}
+                    value={String(projectDefaults.hoursPerDay)}
+                    onChange={e => handleHoursPerDayChange(e.target.value)}
+                    onBlur={e => handleHoursPerDayChange(e.target.value)}
+                  />
+                </Field>
+                <Field label="Hours per week" validationMessage={hpwError ?? undefined} validationState={hpwError ? 'error' : 'none'}>
+                  <Input
+                    type="number"
+                    style={{ width: '100px' }}
+                    value={String(projectDefaults.hoursPerWeek)}
+                    onChange={e => handleHoursPerWeekChange(e.target.value)}
+                    onBlur={e => handleHoursPerWeekChange(e.target.value)}
+                  />
+                </Field>
+                <Field label="Days per month" validationMessage={dpmError ?? undefined} validationState={dpmError ? 'error' : 'none'}>
+                  <Input
+                    type="number"
+                    style={{ width: '100px' }}
+                    value={String(projectDefaults.daysPerMonth)}
+                    onChange={e => handleDaysPerMonthChange(e.target.value)}
+                    onBlur={e => handleDaysPerMonthChange(e.target.value)}
+                  />
+                </Field>
+              </div>
+
+              <div style={{ fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                These defaults apply to all projects unless overridden per project in Step 4.
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* ── Fetch action ── */}
       <div className={styles.sectionBox}>

@@ -72,7 +72,7 @@ const LEVEL_PREFIX: Record<LogLine['level'], string> = {
 export function Step3CreateColumns() {
   const styles = useStyles()
   const {
-    fetchedData, mappingConfig, selectedSolution, setOptionSetMappings,
+    fetchedData, mappingConfig, selectedSolution, setOptionSetMappings, setMappingConfig,
     nextStep, prevStep, migrationMode, setSchemaCreationResults,
   } = useMigration()
 
@@ -124,6 +124,9 @@ export function Step3CreateColumns() {
       })
       setOptionSetMappings(orchestration.optionSetMappings)
       setSchemaCreationResults(orchestration)
+      if (orchestration.multiLookupMappings.length > 0 && mappingConfig) {
+        setMappingConfig({ ...mappingConfig, multiLookups: orchestration.multiLookupMappings })
+      }
       const ok =
         orchestration.columns.created.length +
         orchestration.optionSets.created.length +

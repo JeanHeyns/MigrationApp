@@ -2,9 +2,11 @@ import * as XLSX from 'xlsx'
 import type {
   PoFetchedData, PoProject, PoTask, PoResource, PoAssignment, PoTaskDependency,
   PoProjectTeamMember, PoCustomField, PoLookupTable, PoCustomFieldType,
+  FileUploadProjectOverride,
 } from '../models/projectOnline.types'
 import type { LoaderWarning, LoaderError, LoaderResult } from './fileUpload/types'
 import { LoaderFileError } from './fileUpload/types'
+import { FALLBACK_SCHEDULE_MODES } from './plannerPremium/scheduleMode'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -34,8 +36,8 @@ const VALID_ENTITY_TYPES = ['Project', 'Task', 'Resource'] as const
 
 const TEMPLATE_SHEETS: Record<string, unknown[][]> = {
   Projects: [
-    ['ProjectId', 'ProjectName', 'Description', 'StartDate', 'FinishDate', 'Status', 'OwnerEmail', 'OwnerName', 'Department', 'Budget'],
-    ['P001', 'Example Project', 'A sample project', '2024-01-15', '2024-12-31', 'Active', 'jane.smith@contoso.com', 'Jane Smith', 'IT', 50000],
+    ['ProjectId', 'ProjectName', 'Description', 'StartDate', 'FinishDate', 'Status', 'OwnerEmail', 'OwnerName', 'WorkHourTemplateName', 'ScheduleMode', 'HoursPerDay', 'HoursPerWeek', 'DaysPerMonth', 'Department', 'Budget'],
+    ['P001', 'Example Project', 'A sample project', '2024-01-15', '2024-12-31', 'Active', 'jane.smith@contoso.com', 'Jane Smith', '', '', '', '', '', 'IT', 50000],
   ],
   Tasks: [
     ['TaskId', 'ProjectId', 'TaskName', 'StartDate', 'FinishDate', 'DurationDays', 'PercentComplete', 'OutlineLevel', 'OutlineNumber', 'ParentTaskId', 'IsMilestone', 'IsSummary', 'Priority'],
@@ -92,7 +94,13 @@ const INSTRUCTIONS_ROWS: string[][] = [
   [''],
   ['You don\'t need to fill in everything. Use what you have:'],
   [''],
-  ['- Projects: at least one row recommended. Add custom field values as extra columns.'],
+  ['- Projects: at least one row recommended. Add custom field values as extra columns. Five optional columns control scheduling:'],
+  ['    WorkHourTemplateName — name of an existing work hour template in the target Dataverse (case-insensitive match).'],
+  ['    ScheduleMode — one of: Fixed Effort, Fixed Duration, Fixed Units, Fixed Duration / Effort Driven, Fixed Units / Effort Driven.'],
+  ['    HoursPerDay — hours per working day (0 < value ≤ 24).'],
+  ['    HoursPerWeek — hours per working week (0 < value ≤ 168).'],
+  ['    DaysPerMonth — working days per month (0 < value ≤ 31).'],
+  ['    Leave any of these blank to use the global defaults configured in Step 1.'],
   ['- Tasks: fill in if you want to migrate tasks and the schedule.'],
   ['- Resources: people working on projects. Required for Assignments and TeamMembers.'],
   ['- Assignments: which resources work on which tasks. Requires Tasks and Resources.'],
@@ -561,7 +569,7 @@ function parseSheets(wb: XLSX.WorkBook): { fetchedData: PoFetchedData; warnings:
   // ── 4. Projects ──────────────────────────────────────────────────────────
   const projectCFs = customFields.filter(cf => cf.CustomFieldEntityType === 'Project')
   const expectedProjectCFHeaders = new Set(projectCFs.map(cf => cf.ODataFieldName!))
-  const standardProjectHeaders = new Set(['ProjectId', 'ProjectName', 'Description', 'StartDate', 'FinishDate', 'Status', 'OwnerEmail', 'OwnerName'])
+  const standardProjectHeaders = new Set(['ProjectId', 'ProjectName', 'Description', 'StartDate', 'FinishDate', 'Status', 'OwnerEmail', 'OwnerName', 'WorkHourTemplateName', 'ScheduleMode', 'HoursPerDay', 'HoursPerWeek', 'DaysPerMonth'])
 
   // Warn once per unrecognized extra column (before row iteration)
   if (wb.Sheets['Projects']) {
@@ -577,6 +585,8 @@ function parseSheets(wb: XLSX.WorkBook): { fetchedData: PoFetchedData; warnings:
   }
 
   const projectSeenIds = new Set<string>()
+  const fileUploadProjectOverrides: FileUploadProjectOverride[] = []
+
   const projects: PoProject[] = sheetToRows(wb, 'Projects')
     .map((r, i) => {
       const rawId = str(r['ProjectId'])
@@ -624,6 +634,77 @@ function parseSheets(wb: XLSX.WorkBook): { fetchedData: PoFetchedData; warnings:
       for (const cf of projectCFs) {
         const col = cf.ODataFieldName!
         if (col in r) proj[col] = r[col]
+      }
+
+      // ── Working time override columns ─────────────────────────────────────
+      const whtName = str(r['WorkHourTemplateName'])
+      const smLabel = str(r['ScheduleMode'])
+      const hpd = num(r['HoursPerDay'])
+      const hpw = num(r['HoursPerWeek'])
+      const dpm = num(r['DaysPerMonth'])
+
+      const hasOverride = whtName || smLabel || hpd !== undefined || hpw !== undefined || dpm !== undefined
+      if (hasOverride) {
+        const override: FileUploadProjectOverride = { projectId }
+
+        if (whtName) {
+          override.workHourTemplateName = whtName
+        }
+
+        if (smLabel) {
+          const match = FALLBACK_SCHEDULE_MODES.find(
+            o => o.label.trim().toLowerCase() === smLabel.trim().toLowerCase(),
+          )
+          if (match) {
+            override.scheduleModeLabel = smLabel
+          } else {
+            pushWarning(warnings, capCounts, {
+              sheet: 'Projects', row: i + 2, column: 'ScheduleMode',
+              code: 'UNKNOWN_SCHEDULE_MODE',
+              message: `Unknown schedule mode "${smLabel}" for project "${name}". Field ignored. Valid values: ${FALLBACK_SCHEDULE_MODES.map(o => o.label).join(', ')}.`,
+            })
+          }
+        }
+
+        if (hpd !== undefined) {
+          if (hpd <= 0 || hpd > 24) {
+            pushWarning(warnings, capCounts, {
+              sheet: 'Projects', row: i + 2, column: 'HoursPerDay',
+              code: 'WORKING_TIME_OUT_OF_RANGE',
+              message: `HoursPerDay ${hpd} out of range (0 < value ≤ 24) for project "${name}". Field ignored.`,
+            })
+          } else {
+            override.hoursPerDay = hpd
+          }
+        }
+
+        if (hpw !== undefined) {
+          if (hpw <= 0 || hpw > 168) {
+            pushWarning(warnings, capCounts, {
+              sheet: 'Projects', row: i + 2, column: 'HoursPerWeek',
+              code: 'WORKING_TIME_OUT_OF_RANGE',
+              message: `HoursPerWeek ${hpw} out of range (0 < value ≤ 168) for project "${name}". Field ignored.`,
+            })
+          } else {
+            override.hoursPerWeek = hpw
+          }
+        }
+
+        if (dpm !== undefined) {
+          if (dpm <= 0 || dpm > 31) {
+            pushWarning(warnings, capCounts, {
+              sheet: 'Projects', row: i + 2, column: 'DaysPerMonth',
+              code: 'WORKING_TIME_OUT_OF_RANGE',
+              message: `DaysPerMonth ${dpm} out of range (0 < value ≤ 31) for project "${name}". Field ignored.`,
+            })
+          } else {
+            override.daysPerMonth = dpm
+          }
+        }
+
+        if (override.workHourTemplateName || override.scheduleModeLabel || override.hoursPerDay !== undefined || override.hoursPerWeek !== undefined || override.daysPerMonth !== undefined) {
+          fileUploadProjectOverrides.push(override)
+        }
       }
 
       return proj
@@ -878,6 +959,7 @@ function parseSheets(wb: XLSX.WorkBook): { fetchedData: PoFetchedData; warnings:
       teamMembers,
       customFields,
       lookupTables,
+      ...(fileUploadProjectOverrides.length > 0 ? { fileUploadProjectOverrides } : {}),
     },
     warnings,
   }

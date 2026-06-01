@@ -1,9 +1,12 @@
 import type { PoProject } from '../../models/projectOnline.types'
 import type { FieldMapping, MappingConfiguration, OptionSetMapping } from '../../models/mapping.types'
-import type { ImportError, ProjectFieldWriteDiagnostic, ProjectWriteDiagnostic } from '../../models/plannerPremium.types'
+import type { AssociationAttempt, ImportError, ProjectFieldWriteDiagnostic, ProjectWriteDiagnostic } from '../../models/plannerPremium.types'
 import type { FieldResolver } from './resolverFactory'
 import type { SkippedField } from './recordResolverApplier'
-import { listRecords, performUnboundAction, patchRecord } from './dataverseClient'
+import type { ProjectDefaults, ProjectOverride } from '../../types/projectDefaults'
+import { DEFAULT_PROJECT_DEFAULTS } from '../../types/projectDefaults'
+import { effectiveSettings } from '../../utils/effectiveProjectSettings'
+import { listRecords, performUnboundAction, patchRecord, associateNNRecord, disassociateNNRecord, listAssociatedNNRecords } from './dataverseClient'
 import { cleanGuid, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
 import { classifyDataverseError } from './errorClassifier'
 import { applyResolvers } from './recordResolverApplier'
@@ -22,6 +25,8 @@ export interface ProjectWriteResult {
   error?: ImportError
   skippedFields?: SkippedField[]
   diagnostic?: ProjectWriteDiagnostic
+  associationsCreated?: number
+  associationDiagnostics?: AssociationAttempt[]
 }
 
 /**
@@ -39,6 +44,8 @@ export async function writeProjects(
   onProgress?: (result: ProjectWriteResult) => void,
   resolvers?: Map<string, FieldResolver>,
   ownerOverrides?: Record<string, string>,
+  projectDefaults?: ProjectDefaults,
+  projectOverridesMap?: Map<string, ProjectOverride>,
 ): Promise<ProjectWriteResult[]> {
   const results: ProjectWriteResult[] = []
   const dataOnly = mappingConfig.migrationMode === 'dataOnly' && !!resolvers
@@ -54,7 +61,7 @@ export async function writeProjects(
 
   const effectiveResolvers = dataOnly
     ? resolvers!
-    : await buildFullModeResolverMap(mappingConfig.fieldMappings, optionSetMappings)
+    : await buildFullModeResolverMap(mappingConfig.fieldMappings, optionSetMappings, mappingConfig.multiLookups)
 
   let isFirstProject = true
 
@@ -64,7 +71,7 @@ export async function writeProjects(
       const existingId = cleanGuid(getRecordId(existing[0] ?? {}, 'msdyn_projectid'))
 
       if (existingId) {
-        const { error, skippedFields, diagnostic } = await applyProjectPatch(
+        const { error, skippedFields, diagnostic, associationsCreated, associationDiagnostics } = await applyProjectPatch(
           existingId, project, mappingConfig, effectiveResolvers, isFirstProject,
           ownerOverrides?.[project.ProjectId],
         )
@@ -77,21 +84,37 @@ export async function writeProjects(
           ...(error ? { error } : {}),
           ...(skippedFields?.length ? { skippedFields } : {}),
           diagnostic,
+          ...(associationsCreated > 0 ? { associationsCreated } : {}),
+          ...(associationDiagnostics.length > 0 ? { associationDiagnostics } : {}),
         }
         results.push(result)
         onProgress?.(result)
         continue
       }
 
-      const body = {
-        Project: {
-          '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_project',
-          msdyn_projectid: sourceGuidOrNew(project.ProjectId),
-          msdyn_subject: project.ProjectName,
-          msdyn_description: project.ProjectDescription,
-          msdyn_scheduledstart: project.ProjectStartDate,
-        },
+      const settings = effectiveSettings(
+        project.ProjectId,
+        projectDefaults ?? DEFAULT_PROJECT_DEFAULTS,
+        projectOverridesMap ?? new Map(),
+      )
+      const projectPayload: Record<string, unknown> = {
+        '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_project',
+        msdyn_projectid: sourceGuidOrNew(project.ProjectId),
+        msdyn_subject: project.ProjectName,
+        msdyn_description: project.ProjectDescription,
+        msdyn_scheduledstart: project.ProjectStartDate,
+        msdyn_hoursperday: settings.hoursPerDay,
+        msdyn_hoursperweek: settings.hoursPerWeek,
+        msdyn_dayspermonth: settings.daysPerMonth,
       }
+      if (settings.workHourTemplateId) {
+        projectPayload['msdyn_workhourtemplate@odata.bind'] =
+          `/msdyn_workhourtemplates(${settings.workHourTemplateId})`
+      }
+      if (settings.scheduleMode !== null) {
+        projectPayload['msdyn_schedulemode'] = settings.scheduleMode
+      }
+      const body = { Project: projectPayload }
 
       const response = await performUnboundAction('msdyn_CreateProjectV1', body)
       const dvProjectId = cleanGuid((response.ProjectId ?? response.projectId ?? response.msdyn_projectid) as string | undefined)
@@ -99,6 +122,8 @@ export async function writeProjects(
       let patchError: ImportError | undefined
       let skippedFields: SkippedField[] | undefined
       let diagnostic: ProjectWriteDiagnostic | undefined
+      let associationsCreated = 0
+      let associationDiagnostics: AssociationAttempt[] = []
 
       if (dvProjectId) {
         const patchResult = await applyProjectPatch(
@@ -107,6 +132,8 @@ export async function writeProjects(
         )
         patchError = patchResult.error
         skippedFields = patchResult.skippedFields
+        associationsCreated = patchResult.associationsCreated
+        associationDiagnostics = patchResult.associationDiagnostics
         diagnostic = {
           ...patchResult.diagnostic,
           mode: 'created',
@@ -140,6 +167,8 @@ export async function writeProjects(
             : {}),
         ...(skippedFields?.length ? { skippedFields } : {}),
         ...(diagnostic ? { diagnostic } : {}),
+        ...(associationsCreated > 0 ? { associationsCreated } : {}),
+        ...(associationDiagnostics.length > 0 ? { associationDiagnostics } : {}),
       }
       results.push(result)
       onProgress?.(result)
@@ -162,6 +191,8 @@ interface PatchResult {
   error?: ImportError
   skippedFields?: SkippedField[]
   diagnostic: ProjectWriteDiagnostic
+  associationsCreated: number
+  associationDiagnostics: AssociationAttempt[]
 }
 
 async function applyProjectPatch(
@@ -190,7 +221,12 @@ async function applyProjectPatch(
   const projectFieldMappings = mappingConfig.fieldMappings.filter(
     m => m.customField.CustomFieldEntityType === 'Project',
   )
-  const applied = applyResolvers(project as Record<string, unknown>, projectFieldMappings, resolvers)
+  const applied = applyResolvers(
+    project as Record<string, unknown>,
+    projectFieldMappings,
+    resolvers,
+    mappingConfig.multiLookups,
+  )
   const customPayload = applied.payload
   const skippedFields = applied.skippedFields.length > 0 ? applied.skippedFields : undefined
 
@@ -221,26 +257,95 @@ async function applyProjectPatch(
     patchAttempted: Object.keys(patch).length > 0,
   }
 
+  let patchSucceeded: boolean | undefined
+  let patchErrorMsg: string | undefined
+
   if (Object.keys(patch).length === 0) {
-    return {
-      skippedFields,
-      diagnostic: { ...diagnosticBase, patchSucceeded: undefined },
+    patchSucceeded = undefined
+  } else {
+    try {
+      await patchRecord('msdyn_projects', dvProjectId, patch)
+      patchSucceeded = true
+    } catch (e) {
+      patchErrorMsg = `Custom field patch failed: ${String(e)}`
     }
   }
 
-  try {
-    await patchRecord('msdyn_projects', dvProjectId, patch)
-    return {
-      skippedFields,
-      diagnostic: { ...diagnosticBase, patchSucceeded: true },
+  // Process N:N associations
+  let associationsCreated = 0
+  const isReRun = mappingConfig.migrationMode === 'dataOnly'
+  const assocDiagnostics: AssociationAttempt[] = []
+
+  for (const assoc of applied.pendingAssociations) {
+    const diagEntry: AssociationAttempt = {
+      projectId: project.ProjectId,
+      projectName: project.ProjectName,
+      poFieldName: assoc.poFieldName,
+      targetEntitySetName: assoc.targetEntitySetName,
+      navigationPropertyName: assoc.navigationPropertyName,
+      requestedLabels: [...assoc.resolvedLabels, ...assoc.failedLabels],
+      matchedGuids: assoc.guids,
+      failedLabels: assoc.failedLabels,
+      attempts: [],
     }
-  } catch (e) {
-    const message = `Custom field patch failed: ${String(e)}`
-    return {
-      error: nowError('Project', dvProjectId, message),
-      skippedFields,
-      diagnostic: { ...diagnosticBase, patchSucceeded: false, patchError: message },
+
+    if (isReRun) {
+      try {
+        const targetIdField = `${assoc.targetEntitySetName.replace(/s$/, '')}id`
+        const existing = await listAssociatedNNRecords('msdyn_projects', dvProjectId, assoc.navigationPropertyName, targetIdField)
+        for (const targetId of existing) {
+          try {
+            await disassociateNNRecord('msdyn_projects', dvProjectId, assoc.navigationPropertyName, targetId)
+          } catch { /* best-effort */ }
+        }
+      } catch { /* best-effort */ }
     }
+
+    for (const targetGuid of assoc.guids) {
+      const start = Date.now()
+      const url = `/api/data/v9.2/msdyn_projects(${dvProjectId})/${assoc.navigationPropertyName}/$ref`
+      const body = { '@odata.id': `/api/data/v9.1.0/${assoc.targetEntitySetName}(${targetGuid})` }
+      try {
+        await associateNNRecord('msdyn_projects', dvProjectId, assoc.navigationPropertyName, assoc.targetEntitySetName, targetGuid)
+        associationsCreated++
+        diagEntry.attempts.push({ targetGuid, url, body, httpStatus: 204, durationMs: Date.now() - start, timestamp: new Date().toISOString() })
+      } catch (err) {
+        const cls = classifyDataverseError(err)
+        if (cls === 'AlreadyExists') {
+          associationsCreated++
+          diagEntry.attempts.push({ targetGuid, url, body, httpStatus: 204, errorCode: 'AlreadyExists', durationMs: Date.now() - start, timestamp: new Date().toISOString() })
+          continue
+        }
+        if (isDebug()) console.warn(`[projectWriter] associate failed for ${assoc.poFieldName}/${targetGuid}:`, err)
+        diagEntry.attempts.push({
+          targetGuid, url, body,
+          httpStatus: (err as Record<string, unknown>)['status'] as number | undefined,
+          errorCode: cls !== 'Other' ? cls : undefined,
+          errorMessage: String((err as Record<string, unknown>)['message'] ?? err),
+          durationMs: Date.now() - start,
+          timestamp: new Date().toISOString(),
+        })
+      }
+    }
+
+    assocDiagnostics.push(diagEntry)
+  }
+
+  if (patchErrorMsg) {
+    return {
+      error: nowError('Project', dvProjectId, patchErrorMsg),
+      skippedFields,
+      diagnostic: { ...diagnosticBase, patchSucceeded: false, patchError: patchErrorMsg },
+      associationsCreated,
+      associationDiagnostics: assocDiagnostics,
+    }
+  }
+
+  return {
+    skippedFields,
+    diagnostic: { ...diagnosticBase, patchSucceeded },
+    associationsCreated,
+    associationDiagnostics: assocDiagnostics,
   }
 }
 

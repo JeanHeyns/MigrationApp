@@ -12,6 +12,7 @@ import { useMigration } from '../../app/MigrationContext'
 import {
   fetchEntityAttributes,
   fetchEntityDefinitions,
+  fetchEntityWithCustomAttributes,
   fetchGlobalOptionSetDefinitions,
   fetchSolutionComponentIds,
   fetchSolutionEntityIds,
@@ -22,8 +23,8 @@ import {
 import { toLogicalName } from '../../services/projectOnline/customFields'
 import { lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
 import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoLookupTable } from '../../models/projectOnline.types'
-import type { DataverseColumnType, FieldMapping, MappingConfiguration } from '../../models/mapping.types'
-import type { ColumnMeta, ColumnMetaType, EntitySchema, ResolverEntry, ResolverPlan, SchemaSnapshot } from '../../models/dataOnly.types'
+import type { DataverseColumnType, FieldMapping, MappingConfiguration, MultiLookupMapping, MultiLookupTargetShape } from '../../models/mapping.types'
+import type { ColumnMeta, ColumnMetaType, EntitySchema, NNRelationshipMeta, ResolverEntry, ResolverPlan, SchemaSnapshot } from '../../models/dataOnly.types'
 
 // ─── Type mappings ────────────────────────────────────────────────────────────
 
@@ -155,6 +156,15 @@ function autoMatchColumn(cf: PoCustomField, compatible: ColumnMeta[], prefix: st
   return compatible.find(c => c.displayName.toLowerCase() === displayLower) ?? null
 }
 
+function findMultiChoiceColumn(mapping: FieldMapping, snapshot: SchemaSnapshot | null, prefix: string): ColumnMeta | null {
+  const projectEntity = snapshot?.entities['msdyn_project']
+  if (!projectEntity) return null
+  const compatible = getCompatibleColumns(projectEntity, 'LookupMulti')
+  return autoMatchColumn(mapping.customField, compatible, prefix)
+    ?? compatible.find(c => c.logicalName === mapping.targetLogicalName)
+    ?? null
+}
+
 function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, prefix: string): FieldMapping[] {
   const lookupMap = new Map(data.lookupTables.map(lt => [lt.LookupTableUID, lt]))
   return data.customFields.map(cf => {
@@ -166,12 +176,14 @@ function buildDataOnlyMappings(data: PoFetchedData, snapshot: SchemaSnapshot, pr
       : undefined
 
     if (compatible.length === 0) {
+      // LookupMulti N:N fields have no MultiSelectPicklist column — keep active (handled via multiLookups)
+      const skipField = cf.CustomFieldType !== 'LookupMulti'
       return {
         customField: cf,
         targetColumnType: SUGGESTED_DV_TYPE[cf.CustomFieldType],
         targetLogicalName: toLogicalName(cf.CustomFieldName, prefix),
         lookupTable,
-        skip: true,
+        skip: skipField,
         migrateValue: false,
         useExistingField: false,
       }
@@ -258,6 +270,71 @@ function buildResolverPlanFromMappings(
     })
   }
   return { fields }
+}
+
+// ─── Multi-lookup helpers ──────────────────────────────────────────────────────
+
+function buildInitialMultiLookupMappings(data: PoFetchedData): MultiLookupMapping[] {
+  return data.customFields
+    .filter(cf => cf.CustomFieldType === 'LookupMulti' && cf.CustomFieldEntityType === 'Project')
+    .map(cf => ({
+      poFieldName: cf.ODataFieldName || cf.CustomFieldName,
+      targetShape: 'MultiChoice' as MultiLookupTargetShape,
+    }))
+}
+
+function buildDataOnlyMultiLookupMappings(data: PoFetchedData, snapshot: SchemaSnapshot, prefix: string): MultiLookupMapping[] {
+  const projectEntity = snapshot.entities['msdyn_project']
+  return data.customFields
+    .filter(cf => cf.CustomFieldType === 'LookupMulti' && cf.CustomFieldEntityType === 'Project')
+    .map(cf => {
+      const poFieldName = cf.ODataFieldName || cf.CustomFieldName
+      const expectedLogicalName = toLogicalName(cf.CustomFieldName, prefix)
+
+      // Check for MultiChoice column (MultiSelectPicklist with expected name)
+      const mcColumn = projectEntity?.attributes.find(
+        a => a.logicalName === expectedLogicalName && a.type === 'MultiSelectPicklist',
+      )
+
+      // Check for N:N relationship targeting the expected lookup entity
+      let nnRel: NNRelationshipMeta | undefined
+      if (cf.CustomFieldLookupTableUID && data.lookupTables) {
+        const lt = data.lookupTables.find(t => t.LookupTableUID === cf.CustomFieldLookupTableUID)
+        if (lt) {
+          const expectedEntity = lookupEntityLogicalName(lt, prefix)
+          nnRel = projectEntity?.nnRelationships?.find(r => r.targetEntityLogicalName === expectedEntity)
+        }
+      }
+
+      // N:N takes priority (spec A.10.2)
+      if (nnRel) {
+        const navProp = nnRel.entity1LogicalName === 'msdyn_project'
+          ? nnRel.entity2NavigationPropertyName
+          : nnRel.entity1NavigationPropertyName
+        return {
+          poFieldName,
+          targetShape: 'N:N' as MultiLookupTargetShape,
+          targetEntityLogicalName: nnRel.targetEntityLogicalName,
+          targetEntitySetName: nnRel.targetEntitySetName,
+          matchFieldLogicalName: '',  // user must confirm match field
+          relationshipSchemaName: nnRel.schemaName,
+          navigationPropertyName: navProp,
+          relationshipType: 'pure-nn' as const,
+        }
+      }
+      if (mcColumn) {
+        return {
+          poFieldName,
+          targetShape: 'MultiChoice' as MultiLookupTargetShape,
+          targetColumnLogicalName: mcColumn.logicalName,
+        }
+      }
+      // Neither found — default to N:N (user can configure; error shown in bottom panel)
+      return {
+        poFieldName,
+        targetShape: 'N:N' as MultiLookupTargetShape,
+      }
+    })
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -381,6 +458,9 @@ export function Step2Mapping() {
   const prefix = selectedSolution?.publisherPrefix ?? 'cr9a1'
 
   const [fieldMappings, setFieldMappings] = useState<FieldMapping[]>([])
+  const [multiLookupMappingsState, setMultiLookupMappingsState] = useState<MultiLookupMapping[]>([])
+  // Cache of fetched attributes per lookup entity logical name
+  const [mlEntityAttrs, setMlEntityAttrs] = useState<Record<string, DvEntityAttribute[]>>({})
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
@@ -390,6 +470,26 @@ export function Step2Mapping() {
   const [loadWarning, setLoadWarning] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Pre-fetch attributes for already-configured multi-lookup target entities
+  useEffect(() => {
+    for (const ml of multiLookupMappingsState) {
+      const target = ml.targetEntityLogicalName
+      if (!target) continue
+      if (schemaSnapshot?.entities[target] || mlEntityAttrs[target]) continue
+      fetchEntityWithCustomAttributes(target)
+        .then(data => setMlEntityAttrs(prev => ({
+          ...prev,
+          [target]: data.rawAttrs.map(a => ({
+            logicalName: a.LogicalName,
+            displayName: a.DisplayName?.UserLocalizedLabel?.Label ?? a.LogicalName,
+            attributeType: a.AttributeType,
+          })),
+        })))
+        .catch(() => {})
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multiLookupMappingsState])
+
   // Initialise mappings from fetched data (or restore from context).
   // In dataOnly mode, re-init when schemaSnapshot becomes available.
   // mappingConfig intentionally excluded — loadJson handler sets it directly.
@@ -397,14 +497,18 @@ export function Step2Mapping() {
     if (!fetchedData) return
     if (mappingConfig) {
       setFieldMappings(mappingConfig.fieldMappings)
+      setMultiLookupMappingsState(mappingConfig.multiLookups ?? [])
       return
     }
     if (migrationMode === 'dataOnly' && schemaSnapshot) {
       setFieldMappings(buildDataOnlyMappings(fetchedData, schemaSnapshot, prefix))
+      setMultiLookupMappingsState(buildDataOnlyMultiLookupMappings(fetchedData, schemaSnapshot, prefix))
     } else if (migrationMode === 'schemaOnly') {
       setFieldMappings(buildSchemaOnlyMappings(fetchedData, prefix))
+      setMultiLookupMappingsState(buildInitialMultiLookupMappings(fetchedData))
     } else if (migrationMode === 'full') {
       setFieldMappings(buildInitialMappings(fetchedData, prefix))
+      setMultiLookupMappingsState(buildInitialMultiLookupMappings(fetchedData))
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchedData, prefix, migrationMode, schemaSnapshot])
@@ -541,6 +645,73 @@ export function Step2Mapping() {
         matchSource: 'manual' as const,
       }
     }))
+
+    const mapping = fieldMappings[idx]
+    if (mapping?.customField.CustomFieldType === 'LookupMulti') {
+      const poFieldName = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
+      setMultiLookupMappingsState(prev => {
+        const existing = prev.find(ml => ml.poFieldName === poFieldName)
+        const updated: MultiLookupMapping = {
+          ...(existing ?? {}),
+          poFieldName,
+          targetShape: 'MultiChoice',
+          targetColumnLogicalName: logicalName || undefined,
+        }
+        return [...prev.filter(ml => ml.poFieldName !== poFieldName), updated]
+      })
+    }
+  }
+
+  function setMultiLookupTargetShape(idx: number, poFieldName: string, newShape: MultiLookupTargetShape) {
+    const mapping = fieldMappings[idx]
+    if (!mapping) return
+    const multiChoiceColumn = newShape === 'MultiChoice'
+      ? findMultiChoiceColumn(mapping, schemaSnapshot, prefix)
+      : null
+
+    setMultiLookupMappingsState(prev => {
+      const existing = prev.find(ml => ml.poFieldName === poFieldName)
+      const updated: MultiLookupMapping = {
+        ...(existing ?? {}),
+        poFieldName,
+        targetShape: newShape,
+        ...(newShape === 'MultiChoice'
+          ? { targetColumnLogicalName: multiChoiceColumn?.logicalName }
+          : {}),
+      }
+      return [...prev.filter(ml => ml.poFieldName !== poFieldName), updated]
+    })
+
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      if (newShape === 'N:N') {
+        return {
+          ...m,
+          targetColumnType: 'MultiSelectOptionSet',
+          targetLogicalName: toLogicalName(m.customField.CustomFieldName, prefix),
+          useExistingField: false,
+          migrateValue: false,
+          matchSource: undefined,
+        }
+      }
+      if (!multiChoiceColumn) {
+        return {
+          ...m,
+          targetColumnType: 'MultiSelectOptionSet',
+          useExistingField: false,
+          migrateValue: false,
+          matchSource: undefined,
+        }
+      }
+      return {
+        ...m,
+        targetLogicalName: multiChoiceColumn.logicalName,
+        targetColumnType: SCHEMA_TYPE_TO_DV_TYPE[multiChoiceColumn.type] ?? 'MultiSelectOptionSet',
+        useExistingField: true,
+        migrateValue: true,
+        matchSource: 'auto' as const,
+      }
+    }))
   }
 
   function setFieldUseExisting(idx: number, useExisting: boolean) {
@@ -568,6 +739,7 @@ export function Step2Mapping() {
       migrationMode,
       fieldMappings,
       ownerMappings: [],
+      multiLookups: multiLookupMappingsState,
       savedAt: new Date().toISOString(),
     }
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
@@ -587,6 +759,7 @@ export function Step2Mapping() {
       try {
         const config = JSON.parse(ev.target?.result as string) as MappingConfiguration
         setFieldMappings(config.fieldMappings)
+        setMultiLookupMappingsState(config.multiLookups ?? [])
         const loadedMode = config.migrationMode ?? 'full'
         setMigrationMode(loadedMode)
         if (loadedMode === 'dataOnly' && !schemaSnapshot) {
@@ -606,10 +779,13 @@ export function Step2Mapping() {
     if (!fetchedData) return
     if (migrationMode === 'dataOnly' && schemaSnapshot) {
       setFieldMappings(buildDataOnlyMappings(fetchedData, schemaSnapshot, prefix))
+      setMultiLookupMappingsState(buildDataOnlyMultiLookupMappings(fetchedData, schemaSnapshot, prefix))
     } else if (migrationMode === 'schemaOnly') {
       setFieldMappings(buildSchemaOnlyMappings(fetchedData, prefix))
+      setMultiLookupMappingsState(buildInitialMultiLookupMappings(fetchedData))
     } else {
       setFieldMappings(buildInitialMappings(fetchedData, prefix))
+      setMultiLookupMappingsState(buildInitialMultiLookupMappings(fetchedData))
     }
   }
 
@@ -631,6 +807,7 @@ export function Step2Mapping() {
       migrationMode,
       fieldMappings,
       ownerMappings: [],
+      multiLookups: multiLookupMappingsState,
       savedAt: new Date().toISOString(),
     }
     setMappingConfig(config)
@@ -639,6 +816,7 @@ export function Step2Mapping() {
     }
     nextStep()
   }
+
 
   const activeFields = fieldMappings.filter(m => !m.skip)
   const migratingFields = fieldMappings.filter(m => !m.skip && m.migrateValue)
@@ -651,6 +829,13 @@ export function Step2Mapping() {
   const unmappedDataOnlyRows = migrationMode === 'dataOnly' && schemaSnapshot
     ? fieldMappings.filter(m => {
         if (m.skip) return false
+        // N:N LookupMulti fields are configured in the bottom panel — not "unmapped"
+        if (m.customField.CustomFieldType === 'LookupMulti') {
+          const poFN = m.customField.ODataFieldName || m.customField.CustomFieldName
+          const ml = multiLookupMappingsState.find(x => x.poFieldName === poFN)
+          if (!ml || ml.targetShape === 'N:N') return false
+          return !(m.useExistingField && m.targetLogicalName)
+        }
         const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
         const dvEntity = dvEntityKey ? schemaSnapshot.entities[dvEntityKey] : undefined
         const compat = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
@@ -734,6 +919,7 @@ export function Step2Mapping() {
               <th className={styles.th} style={{ width: '40px' }}>Skip</th>
               <th className={styles.th}>Field Name</th>
               <th className={styles.th} style={{ whiteSpace: 'nowrap' }}>PO Type</th>
+              <th className={styles.th} style={{ width: '140px', whiteSpace: 'nowrap' }}>Migrate as</th>
               <th className={styles.th}>Dataverse Target</th>
               {migrationMode === 'full' && (
                 <th className={styles.th} style={{ width: '88px', textAlign: 'center' }}>Migrate value</th>
@@ -743,16 +929,24 @@ export function Step2Mapping() {
           <tbody>
             {fieldMappings.length === 0 && (
               <tr>
-                <td className={styles.td} colSpan={5} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
+                <td className={styles.td} colSpan={6} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
                   No custom fields found in Project Online.
                 </td>
               </tr>
             )}
-            {fieldMappings.map((m, idx) => (
+            {fieldMappings.map((m, idx) => {
+              const isLookupMulti = m.customField.CustomFieldType === 'LookupMulti'
+              const poFieldKey = m.customField.ODataFieldName || m.customField.CustomFieldName
+              const mlMapping = isLookupMulti ? multiLookupMappingsState.find(x => x.poFieldName === poFieldKey) : undefined
+              const targetShape: MultiLookupTargetShape = mlMapping?.targetShape ?? (isLookupMulti ? 'MultiChoice' : 'MultiChoice')
+              const isNN = isLookupMulti && targetShape === 'N:N'
+
+              return (
               <tr
                 key={m.customField.CustomFieldId}
                 id={`mapping-row-${m.customField.CustomFieldId}`}
                 className={m.skip ? styles.trSkipped : undefined}
+                style={isNN && !m.skip ? { background: tokens.colorNeutralBackground2 } : undefined}
               >
 
                 {/* Col 1: Skip */}
@@ -765,6 +959,18 @@ export function Step2Mapping() {
                   <div className={styles.fieldNameCell}>
                     <div className={styles.fieldNameBadgeRow}>
                       {migrationMode === 'dataOnly' && !m.skip && (() => {
+                        if (isLookupMulti) {
+                          // N:N: green if configured, yellow if not
+                          if (isNN) {
+                            return mlMapping?.targetEntityLogicalName && mlMapping?.matchFieldLogicalName
+                              ? <span title="N:N configured">🟢</span>
+                              : <span title="N:N — configure below">🟡</span>
+                          }
+                          // MultiChoice: check if column found
+                          return (mlMapping?.targetColumnLogicalName || (m.useExistingField && m.targetLogicalName))
+                            ? <span title="Auto-matched MultiChoice column">🟢</span>
+                            : <span title="No MultiChoice column found">🔴</span>
+                        }
                         const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
                         const dvEntity = dvEntityKey ? schemaSnapshot?.entities[dvEntityKey] : undefined
                         const compatible = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
@@ -781,6 +987,11 @@ export function Step2Mapping() {
                       </span>
                     </div>
                     <span className={styles.logicalName}>{m.targetLogicalName}</span>
+                    {isNN && !m.skip && (
+                      <span style={{ fontSize: '11px', color: tokens.colorNeutralForeground3, fontStyle: 'italic' }}>
+                        Configured below as N:N
+                      </span>
+                    )}
                   </div>
                 </td>
 
@@ -789,10 +1000,33 @@ export function Step2Mapping() {
                   {m.customField.CustomFieldType}
                 </td>
 
-                {/* Col 4: Dataverse Target */}
+                {/* Col 4: Migrate as — only relevant for LookupMulti */}
+                <td className={styles.td}>
+                  {isLookupMulti && !m.skip
+                    ? <>
+                        <Select
+                          size="small"
+                          className={styles.selectFixed}
+                          value={targetShape}
+                          onChange={(_, d) => {
+                            const newShape = d.value as MultiLookupTargetShape
+                            setMultiLookupTargetShape(idx, poFieldKey, newShape)
+                          }}
+                        >
+                          <option value="MultiChoice">MultiChoice</option>
+                          <option value="N:N">N:N relationship</option>
+                        </Select>
+                      </>
+                    : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                  }
+                </td>
+
+                {/* Col 5: Dataverse Target */}
                 <td className={styles.td}>
                   {m.skip
                     ? <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                    : isNN
+                      ? <span style={{ fontSize: '12px', color: tokens.colorNeutralForeground3, fontStyle: 'italic' }}>↓ see N:N panel below</span>
                     : migrationMode === 'schemaOnly'
                       ? <>
                           <Select
@@ -857,12 +1091,10 @@ export function Step2Mapping() {
                           const dvEntity = dvEntityKey ? schemaSnapshot?.entities[dvEntityKey] : undefined
                           const compatible = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
                           if (compatible.length === 0) {
-                            return (
-                              <span style={{ fontSize: '12px', color: '#a4262c' }}>
-                                No compatible {m.customField.CustomFieldType} column in {dvEntityKey ?? 'entity'}.
-                                {' '}Create it manually in Dataverse or switch to Full mode in Step 1.
-                              </span>
-                            )
+                            const hint = isLookupMulti
+                              ? 'No MultiSelectPicklist column found. Run schemaOnly first, or switch Migrate as to N:N.'
+                              : `No compatible ${m.customField.CustomFieldType} column in ${dvEntityKey ?? 'entity'}. Create it manually in Dataverse or switch to Full mode in Step 1.`
+                            return <span style={{ fontSize: '12px', color: '#a4262c' }}>{hint}</span>
                           }
                           return (
                             <Select
@@ -971,7 +1203,7 @@ export function Step2Mapping() {
                   }
                 </td>
 
-                {/* Col 5: Migrate value */}
+                {/* Col 6: Migrate value */}
                 {migrationMode === 'full' && (
                   <td className={styles.td} style={{ textAlign: 'center' }}>
                     <Checkbox
@@ -983,10 +1215,192 @@ export function Step2Mapping() {
                 )}
 
               </tr>
-            ))}
+            )})}
           </tbody>
         </table>
       </div>
+
+      {/* ── Multi-value Lookup Fields (LookupMulti) — N:N panel ── */}
+      {(() => {
+        const allLmFields = fieldMappings.filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti' && m.customField.CustomFieldEntityType === 'Project')
+        const nnFields = allLmFields.filter(m => {
+          const poFN = m.customField.ODataFieldName || m.customField.CustomFieldName
+          const ml = multiLookupMappingsState.find(x => x.poFieldName === poFN)
+          return !ml || ml.targetShape === 'N:N' || ml.targetShape === undefined
+        })
+        if (nnFields.length === 0 && allLmFields.length === 0) return null
+        const projectEntity = schemaSnapshot?.entities['msdyn_project']
+        return (
+          <div>
+            <div className={styles.sectionTitle}>Multi-value lookup fields ({nnFields.length})</div>
+            {(migrationMode === 'full' || migrationMode === 'schemaOnly') && nnFields.length > 0 && (
+              <MessageBar intent="info">
+                <MessageBarBody>
+                  These fields use N:N relationships. Lookup entities and N:N relationships will be created automatically in Step 3.
+                </MessageBarBody>
+              </MessageBar>
+            )}
+            {nnFields.length === 0 && allLmFields.length > 0 && (
+              <div style={{
+                padding: '16px',
+                border: `2px dashed ${tokens.colorNeutralStroke1}`,
+                borderRadius: tokens.borderRadiusMedium,
+                textAlign: 'center',
+                fontSize: '12px',
+                color: tokens.colorNeutralForeground3,
+              }}>
+                No fields set to N:N. Change Migrate as to N:N relationship in the table above to configure here.
+              </div>
+            )}
+            {migrationMode === 'dataOnly' && !schemaSnapshot && (
+              <MessageBar intent="warning">
+                <MessageBarBody>Run a schema scan in Step 1 to map multi-value lookup fields.</MessageBarBody>
+              </MessageBar>
+            )}
+            {migrationMode === 'dataOnly' && schemaSnapshot && nnFields.map(m => {
+              const nnRelsFetched = projectEntity?.nnRelationships !== undefined
+              const nnRels = projectEntity?.nnRelationships ?? []
+              const currentMapping = multiLookupMappingsState.find(ml => ml.poFieldName === (m.customField.ODataFieldName || m.customField.CustomFieldName))
+              const selectedTargetEntity = currentMapping?.targetEntityLogicalName ?? ''
+              const selectedSchemaName = currentMapping?.relationshipSchemaName ?? ''
+              const selectedMatchField = currentMapping?.matchFieldLogicalName ?? ''
+              const poFieldName = m.customField.ODataFieldName || m.customField.CustomFieldName
+              // Attributes from snapshot OR from on-demand fetch (custom lookup entity not in default scan targets)
+              const fetchedAttrs = selectedTargetEntity ? (mlEntityAttrs[selectedTargetEntity] ?? null) : null
+              const snapshotAttrs = selectedTargetEntity ? schemaSnapshot.entities[selectedTargetEntity]?.attributes : undefined
+              const matchFieldCandidates: Array<{ logicalName: string; displayName: string }> = snapshotAttrs
+                ? snapshotAttrs.filter(a => a.type === 'String' || a.type === 'Memo')
+                : fetchedAttrs
+                  ? fetchedAttrs.filter(a => a.attributeType === 'String' || a.attributeType === 'Memo' || a.attributeType === 'Virtual')
+                  : []
+
+              function setMultiLookupTarget(schemaName: string) {
+                const nn = nnRels.find(r => r.schemaName === schemaName)
+                if (!nn) return
+                // Dataverse naming: Entity1NavigationPropertyName is the nav prop ON entity2 pointing to entity1.
+                // Entity2NavigationPropertyName is the nav prop ON entity1 pointing to entity2.
+                // So when entity1 = msdyn_project, the nav prop accessible FROM msdyn_project is entity2NavigationPropertyName.
+                const navProp = nn.entity1LogicalName === 'msdyn_project'
+                  ? nn.entity2NavigationPropertyName
+                  : nn.entity1NavigationPropertyName
+                setMultiLookupMappingsState(prev => {
+                  const existing = prev.find(ml => ml.poFieldName === poFieldName)
+                  const updated: MultiLookupMapping = {
+                    ...(existing ?? {}),
+                    poFieldName,
+                    targetShape: 'N:N',
+                    targetEntityLogicalName: nn.targetEntityLogicalName,
+                    targetEntitySetName: nn.targetEntitySetName,
+                    matchFieldLogicalName: existing?.matchFieldLogicalName ?? '',
+                    relationshipSchemaName: nn.schemaName,
+                    navigationPropertyName: navProp,
+                    relationshipType: 'pure-nn',
+                  }
+                  return [...prev.filter(ml => ml.poFieldName !== poFieldName), updated]
+                })
+                // Fetch attributes for this entity if not already cached or in snapshot
+                if (!schemaSnapshot?.entities[nn.targetEntityLogicalName] && !mlEntityAttrs[nn.targetEntityLogicalName]) {
+                  fetchEntityWithCustomAttributes(nn.targetEntityLogicalName)
+                    .then(data => setMlEntityAttrs(prev => ({
+                      ...prev,
+                      [nn.targetEntityLogicalName]: data.rawAttrs.map(a => ({
+                        logicalName: a.LogicalName,
+                        displayName: a.DisplayName?.UserLocalizedLabel?.Label ?? a.LogicalName,
+                        attributeType: a.AttributeType,
+                      })),
+                    })))
+                    .catch(() => {})
+                }
+              }
+
+              function setMultiLookupMatchField(matchField: string) {
+                setMultiLookupMappingsState(prev => prev.map(ml =>
+                  ml.poFieldName === poFieldName ? { ...ml, matchFieldLogicalName: matchField } : ml
+                ))
+              }
+
+              const isConfigured = !!currentMapping?.targetEntityLogicalName && !!currentMapping?.matchFieldLogicalName
+              const statusColor = !nnRelsFetched ? '#a78a00' : nnRels.length === 0 ? '#a4262c' : isConfigured ? '#107c10' : '#a78a00'
+              const statusText = !nnRelsFetched
+                ? '⚠ Re-scan schema to load N:N relationships'
+                : nnRels.length === 0
+                  ? '✗ No N:N relationships found on msdyn_project'
+                  : isConfigured
+                    ? `✓ ${currentMapping!.targetEntityLogicalName} via ${currentMapping!.matchFieldLogicalName}`
+                    : '⚠ Select target entity and match field'
+
+              return (
+                <div key={m.customField.CustomFieldId} style={{
+                  padding: '12px 14px',
+                  marginTop: '8px',
+                  background: tokens.colorNeutralBackground2,
+                  border: `1px solid ${tokens.colorNeutralStroke1}`,
+                  borderRadius: tokens.borderRadiusMedium,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <strong style={{ fontSize: '13px' }}>{m.customField.CustomFieldName}</strong>
+                    <span style={{ fontSize: '12px', color: statusColor }}>{statusText}</span>
+                  </div>
+                  {!nnRelsFetched ? (
+                    <span style={{ fontSize: '12px', color: '#a78a00' }}>
+                      Schema snapshot is outdated. Go back to Step 1 and re-run the schema scan to load N:N relationships.
+                    </span>
+                  ) : nnRels.length === 0 ? (
+                    <span style={{ fontSize: '12px', color: '#a4262c' }}>
+                      No N:N relationships on msdyn_project in the scanned solution. Run a schemaOnly migration first to create them.
+                    </span>
+                  ) : (
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <span style={{ fontSize: '11px', color: tokens.colorNeutralForeground3 }}>Target entity (N:N)</span>
+                        <Select
+                          size="small"
+                          className={styles.selectFixed}
+                          value={selectedSchemaName}
+                          onChange={(_, d) => setMultiLookupTarget(d.value)}
+                        >
+                          <option value="">— select entity —</option>
+                          {nnRels.map(r => (
+                            <option key={r.schemaName} value={r.schemaName}>
+                              {r.targetEntityLogicalName} ({r.schemaName})
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                      {selectedTargetEntity && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <span style={{ fontSize: '11px', color: tokens.colorNeutralForeground3 }}>Match PO labels against</span>
+                          <Select
+                            size="small"
+                            className={styles.selectFixed}
+                            value={selectedMatchField}
+                            onChange={(_, d) => setMultiLookupMatchField(d.value)}
+                          >
+                            <option value="">— select field —</option>
+                            {matchFieldCandidates.map(a => (
+                              <option key={a.logicalName} value={a.logicalName}>
+                                {a.displayName} ({a.logicalName})
+                              </option>
+                            ))}
+                          </Select>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {m.lookupTable && (
+                    <span style={{ fontSize: '11px', color: tokens.colorNeutralForeground3 }}>
+                      {m.lookupTable.LookupTableName} · {m.lookupTable.entries.length} entries
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )
+      })()}
 
       {/* ── dataOnly no-snapshot warning ── */}
       {migrationMode === 'dataOnly' && !schemaSnapshot && (

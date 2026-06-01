@@ -1,8 +1,16 @@
-import { listRecords, createRecord, updateRecord, performUnboundAction as _performUnboundAction } from '../dataverseService'
+import {
+  listRecords,
+  createRecord,
+  updateRecord,
+  performUnboundAction as _performUnboundAction,
+  associateNNRecord as _associateNNRecord,
+  disassociateNNRecord as _disassociateNNRecord,
+  listAssociatedNNRecords,
+} from '../dataverseService'
 import type { DvSolution, DvSystemUser } from '../../models/plannerPremium.types'
 import { classifyDataverseError } from './errorClassifier'
 
-export { listRecords, createRecord, updateRecord }
+export { listRecords, createRecord, updateRecord, listAssociatedNNRecords }
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -70,6 +78,25 @@ export async function patchRecord(
   item: Record<string, unknown>,
 ): Promise<void> {
   await updateRecord(entityName, id, item)
+}
+
+export async function associateNNRecord(
+  entitySetName: string,
+  recordId: string,
+  navigationPropertyName: string,
+  targetEntitySetName: string,
+  targetId: string,
+): Promise<void> {
+  return withRetry(() => _associateNNRecord(entitySetName, recordId, navigationPropertyName, targetEntitySetName, targetId))
+}
+
+export async function disassociateNNRecord(
+  entitySetName: string,
+  recordId: string,
+  navigationPropertyName: string,
+  targetId: string,
+): Promise<void> {
+  return withRetry(() => _disassociateNNRecord(entitySetName, recordId, navigationPropertyName, targetId))
 }
 
 export async function deleteRecord(entityName: string, id: string): Promise<void> {

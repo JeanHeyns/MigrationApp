@@ -1,4 +1,4 @@
-import type { FieldMapping } from '../../models/mapping.types'
+import type { FieldMapping, MultiLookupMapping } from '../../models/mapping.types'
 import type { FieldResolver } from './resolverFactory'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -15,9 +15,19 @@ export interface SkippedField {
   }
 }
 
+export interface PendingAssociation {
+  poFieldName: string
+  navigationPropertyName: string
+  targetEntitySetName: string
+  guids: string[]
+  failedLabels: string[]
+  resolvedLabels: string[]
+}
+
 export interface AppliedRecord {
   payload: Record<string, unknown>
   skippedFields: SkippedField[]
+  pendingAssociations: PendingAssociation[]
 }
 
 // ─── Main function ────────────────────────────────────────────────────────────
@@ -29,14 +39,17 @@ export interface AppliedRecord {
  * - `resolvers` is keyed by ODataFieldName when present, otherwise CustomFieldName
  * - Fields without a resolver entry use direct pass-through (non-special types)
  * - Unresolved values → field omitted from payload, added to skippedFields
+ * - LookupMulti resolvers produce associateGuids → collected in pendingAssociations
  */
 export function applyResolvers(
   poRecord: Record<string, unknown>,
   fieldMappings: FieldMapping[],
   resolvers: Map<string, FieldResolver>,
+  multiLookupMappings?: MultiLookupMapping[],
 ): AppliedRecord {
   const payload: Record<string, unknown> = {}
   const skippedFields: SkippedField[] = []
+  const pendingAssociations: PendingAssociation[] = []
 
   for (const mapping of fieldMappings) {
     if (mapping.skip || !mapping.migrateValue) continue
@@ -61,7 +74,7 @@ export function applyResolvers(
     const result = resolver.resolve(poValue)
     const originalLabel = result.originalLabel ?? (poValue == null ? undefined : String(poValue))
 
-    switch (result.status) {
+      switch (result.status) {
       case 'empty':
         break
 
@@ -90,7 +103,48 @@ export function applyResolvers(
     }
   }
 
-  return { payload, skippedFields }
+  // Separate loop for N:N multi-lookup fields (not in fieldMappings due to skip/no-column)
+  for (const mlMapping of (multiLookupMappings ?? [])) {
+    if (mlMapping.targetShape === 'MultiChoice') continue
+
+    const resolver = resolvers.get(mlMapping.poFieldName)
+    if (!resolver) continue
+
+    const poValue = poRecord[mlMapping.poFieldName]
+    const result = resolver.resolve(poValue)
+    if (result.status === 'empty') continue
+
+    if (result.associateGuids && result.associateGuids.length > 0) {
+      if (!mlMapping.navigationPropertyName || !mlMapping.targetEntitySetName) {
+        skippedFields.push({
+          poField: mlMapping.poFieldName,
+          dvField: mlMapping.poFieldName,
+          reason: 'N:N mapping is missing navigation property or target entity set name',
+          originalValue: poValue,
+        })
+        continue
+      }
+      pendingAssociations.push({
+        poFieldName: mlMapping.poFieldName,
+        navigationPropertyName: mlMapping.navigationPropertyName,
+        targetEntitySetName: mlMapping.targetEntitySetName,
+        guids: result.associateGuids,
+        failedLabels: result.partialResolution?.failedLabels ?? [],
+        resolvedLabels: result.partialResolution?.resolvedLabels ?? [],
+      })
+    }
+
+    if (result.status === 'unresolved') {
+      skippedFields.push({
+        poField: mlMapping.poFieldName,
+        dvField: mlMapping.poFieldName,
+        reason: result.failureReason ?? buildUnresolvedReason('MultiLookup', String(poValue ?? ''), undefined),
+        originalValue: poValue,
+      })
+    }
+  }
+
+  return { payload, skippedFields, pendingAssociations }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

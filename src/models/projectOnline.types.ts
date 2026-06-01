@@ -112,6 +112,15 @@ export interface PoLookupTable {
   entries: PoLookupEntry[]
 }
 
+export interface FileUploadProjectOverride {
+  projectId: string
+  workHourTemplateName?: string
+  scheduleModeLabel?: string
+  hoursPerDay?: number
+  hoursPerWeek?: number
+  daysPerMonth?: number
+}
+
 export interface PoFetchedData {
   pwaUrl: string
   projects: PoProject[]
@@ -122,4 +131,5 @@ export interface PoFetchedData {
   teamMembers: PoProjectTeamMember[]
   customFields: PoCustomField[]
   lookupTables: PoLookupTable[]
+  fileUploadProjectOverrides?: FileUploadProjectOverride[]
 }

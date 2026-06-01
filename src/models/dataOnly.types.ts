@@ -27,11 +27,24 @@ export interface ColumnMeta {
   navigationProperty?: string  // Lookup — odata.bind property name
 }
 
+export interface NNRelationshipMeta {
+  schemaName: string
+  intersectEntityName: string
+  entity1LogicalName: string
+  entity2LogicalName: string
+  entity1NavigationPropertyName: string
+  entity2NavigationPropertyName: string
+  /** The "other side" relative to the inspected entity */
+  targetEntityLogicalName: string
+  targetEntitySetName: string
+}
+
 export interface EntitySchema {
   logicalName: string
   entitySetName: string        // plural, for OData URLs
   primaryNameField: string
   attributes: ColumnMeta[]
+  nnRelationships?: NNRelationshipMeta[]
 }
 
 export interface GlobalOptionSetMeta {
@@ -104,5 +117,10 @@ export interface SchemaCreationResults {
     inserted: Array<{ entity: string; name: string }>
     skipped: Array<{ entity: string; name: string; reason: string }>
     failed: Array<{ entity: string; name: string; error: string }>
+  }
+  nnRelationships?: {
+    created: Array<{ schemaName: string; poField: string }>
+    skipped: Array<{ schemaName: string; poField: string; reason: string }>
+    failed: Array<{ schemaName: string; poField: string; error: string }>
   }
 }

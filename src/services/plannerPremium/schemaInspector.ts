@@ -5,6 +5,7 @@ import {
   fetchCustomPicklistAttributes,
   fetchEntityWithCustomAttributes,
   fetchGlobalOptionSetFull,
+  getEntityManyToManyRelationships,
   parseOptionSetOptions,
 } from '../dataverseService'
 
@@ -36,10 +37,10 @@ export async function inspectSolution(
 }
 
 async function inspectEntity(entityLogicalName: string): Promise<EntitySchema> {
-  // Single call via existing GetEntityDefinition (confirmed working in this codebase).
-  // The new sub-collection operations (GetEntityAttributes, ManyToOneRelationships) are not
-  // accessible via the commondataserviceforapps connector GET routing — deferred to phase 5.
-  const data = await fetchEntityWithCustomAttributes(entityLogicalName)
+  const [data, nnRelationships] = await Promise.all([
+    fetchEntityWithCustomAttributes(entityLogicalName),
+    getEntityManyToManyRelationships(entityLogicalName).catch(() => []),
+  ])
 
   const attributes: ColumnMeta[] = []
   const [picklists, multiPicklists] = await Promise.all([
@@ -171,6 +172,7 @@ async function inspectEntity(entityLogicalName: string): Promise<EntitySchema> {
     entitySetName:    data.entitySetName,
     primaryNameField: data.primaryNameField,
     attributes,
+    ...(nnRelationships.length > 0 ? { nnRelationships } : {}),
   }
 }
 

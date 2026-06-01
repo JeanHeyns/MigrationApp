@@ -15,12 +15,13 @@ import {
   fetchCustomPicklistAttributes,
   fetchEntityWithCustomAttributes,
   fetchGlobalOptionSetFull,
+  getEntityManyToManyRelationships,
   type AttributeOptionSetMetadata,
   type EntityWithCustomAttributes,
   type OptionSetDebugAttempt,
   type RawPicklistAttributeMeta,
 } from '../../services/dataverseService'
-import type { ColumnMeta, GlobalOptionSetMeta } from '../../models/dataOnly.types'
+import type { ColumnMeta, GlobalOptionSetMeta, NNRelationshipMeta } from '../../models/dataOnly.types'
 
 const TARGET_ENTITIES = [
   { logicalName: 'msdyn_project', label: 'Project (msdyn_project)' },
@@ -131,6 +132,10 @@ export function Troubleshooting() {
   const [optionSetAttempts, setOptionSetAttempts] = useState<OptionSetDebugAttempt[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nnEntity, setNnEntity] = useState('msdyn_project')
+  const [nnFetching, setNnFetching] = useState(false)
+  const [nnRaw, setNnRaw] = useState<NNRelationshipMeta[] | null>(null)
+  const [nnError, setNnError] = useState<string | null>(null)
 
   const snapshotEntity = schemaSnapshot?.entities[entityName]
   const snapshotColumn = snapshotEntity?.attributes.find(a => a.logicalName === fieldName)
@@ -426,6 +431,71 @@ export function Troubleshooting() {
           <pre className={styles.pre}>{pretty(data?.entity)}</pre>
         </section>
       </div>
+
+      {/* ── N:N Relationship Debug ── */}
+      <section className={styles.fullPanel}>
+        <div className={styles.panelTitle}>N:N Relationship Debug</div>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '12px', flexWrap: 'wrap' }}>
+          <label className={styles.field} style={{ minWidth: '220px' }}>
+            <span className={styles.label}>Entity</span>
+            <Select value={nnEntity} onChange={(_, d) => setNnEntity(d.value)}>
+              {TARGET_ENTITIES.map(e => (
+                <option key={e.logicalName} value={e.logicalName}>{e.label}</option>
+              ))}
+            </Select>
+          </label>
+          <Button
+            onClick={async () => {
+              setNnFetching(true)
+              setNnError(null)
+              setNnRaw(null)
+              try {
+                const result = await getEntityManyToManyRelationships(nnEntity)
+                setNnRaw(result)
+              } catch (e) {
+                setNnError(String(e))
+              } finally {
+                setNnFetching(false)
+              }
+            }}
+            disabled={nnFetching}
+          >
+            {nnFetching ? 'Fetching…' : 'Fetch N:N relationships'}
+          </Button>
+        </div>
+
+        {nnError && (
+          <MessageBar intent="error" style={{ marginBottom: '10px' }}>
+            <MessageBarBody>{nnError}</MessageBarBody>
+          </MessageBar>
+        )}
+
+        <div className={styles.grid}>
+          <section className={styles.panel}>
+            <div className={styles.panelTitle}>
+              Live API result — getEntityManyToManyRelationships({nnEntity})
+              {nnRaw !== null && ` — ${nnRaw.length} relationship(s)`}
+            </div>
+            <pre className={styles.pre}>
+              {nnRaw === null && nnError === null
+                ? '— not fetched yet —'
+                : pretty(nnRaw)}
+            </pre>
+          </section>
+
+          <section className={styles.panel}>
+            <div className={styles.panelTitle}>
+              Schema snapshot — {nnEntity} nnRelationships
+              {schemaSnapshot?.entities[nnEntity]?.nnRelationships !== undefined
+                ? ` — ${schemaSnapshot.entities[nnEntity].nnRelationships!.length} relationship(s)`
+                : ' — undefined (re-scan needed)'}
+            </div>
+            <pre className={styles.pre}>
+              {pretty(schemaSnapshot?.entities[nnEntity]?.nnRelationships)}
+            </pre>
+          </section>
+        </div>
+      </section>
 
       <div className={styles.footer}>
         <Button onClick={() => setCurrentStep(1)}>Back to Connect</Button>

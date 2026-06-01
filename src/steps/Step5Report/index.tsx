@@ -7,7 +7,7 @@ import {
   tokens,
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
-import type { ImportError } from '../../models/plannerPremium.types'
+import type { AssociationAttempt, ImportError } from '../../models/plannerPremium.types'
 import type { SchemaCreationResults, SkippedFieldInstance } from '../../models/dataOnly.types'
 
 const useStyles = makeStyles({
@@ -52,6 +52,31 @@ const useStyles = makeStyles({
   toolbar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
   footer: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' },
   muted: { color: tokens.colorNeutralForeground3, fontSize: '12px' },
+  assocFilterBar: { display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' },
+  assocSearchInput: {
+    marginLeft: 'auto',
+    padding: '4px 8px',
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRadius: tokens.borderRadiusMedium,
+    fontSize: '12px',
+    width: '200px',
+    background: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground1,
+  },
+  assocDetail: {
+    background: tokens.colorNeutralBackground1,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    borderRadius: tokens.borderRadiusSmall,
+    padding: '10px',
+    marginTop: '6px',
+    fontSize: '12px',
+    fontFamily: 'Consolas, monospace',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-all',
+  },
+  statusOk: { color: tokens.colorPaletteGreenForeground1, fontWeight: '600' },
+  statusWarn: { color: tokens.colorPaletteYellowForeground2, fontWeight: '600' },
+  statusFail: { color: tokens.colorPaletteRedForeground1, fontWeight: '600' },
 })
 
 // ─── CSV helpers (shared) ─────────────────────────────────────────────────────
@@ -147,6 +172,9 @@ function schemaRows(results: SchemaCreationResults): string[][] {
     ...results.lookupEntries.inserted.map(r => ['Lookup Entries', 'inserted', `${r.entity}.${r.name}`, '']),
     ...results.lookupEntries.skipped.map(r => ['Lookup Entries', 'skipped', `${r.entity}.${r.name}`, r.reason]),
     ...results.lookupEntries.failed.map(r => ['Lookup Entries', 'failed', `${r.entity}.${r.name}`, r.error]),
+    ...(results.nnRelationships?.created ?? []).map(r => ['N:N Relationships', 'created', r.schemaName, r.poField]),
+    ...(results.nnRelationships?.skipped ?? []).map(r => ['N:N Relationships', 'skipped', r.schemaName, r.reason]),
+    ...(results.nnRelationships?.failed ?? []).map(r => ['N:N Relationships', 'failed', r.schemaName, r.error]),
   ]
 }
 
@@ -198,6 +226,220 @@ function buildSkippedGroups(instances: SkippedFieldInstance[]): SkippedGroup[] {
     }))
 }
 
+// ─── Association Diagnostics Panel ───────────────────────────────────────────
+
+type AssocFilter = 'all' | 'failed' | 'nomatch'
+
+function assocStatus(d: AssociationAttempt): { label: string; cls: 'ok' | 'warn' | 'fail' } {
+  if (d.matchedGuids.length === 0) return { label: '⚠ no matches', cls: 'warn' }
+  const failed = d.attempts.filter(a => a.errorMessage && a.errorCode !== 'AlreadyExists').length
+  if (failed > 0) return { label: `✗ ${failed} failed`, cls: 'fail' }
+  return { label: '✓ OK', cls: 'ok' }
+}
+
+function AssociationDiagnosticsPanel({ diagnostics }: { diagnostics: AssociationAttempt[] }) {
+  const styles = useStyles()
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
+  const [expandedAttempts, setExpandedAttempts] = useState<Set<string>>(new Set())
+  const [filter, setFilter] = useState<AssocFilter>('all')
+  const [search, setSearch] = useState('')
+
+  function toggleRow(k: string) {
+    setExpandedRows(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n })
+  }
+  function toggleAttempt(k: string) {
+    setExpandedAttempts(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n })
+  }
+
+  const totalAttempts = diagnostics.reduce((s, d) => s + d.attempts.length, 0)
+  const totalSucceeded = diagnostics.reduce((s, d) =>
+    s + d.attempts.filter(a => !a.errorMessage || a.errorCode === 'AlreadyExists').length, 0)
+  const totalFailed = diagnostics.reduce((s, d) =>
+    s + d.attempts.filter(a => a.errorMessage && a.errorCode !== 'AlreadyExists').length, 0)
+  const projectCount = new Set(diagnostics.map(d => d.projectId)).size
+
+  const filtered = diagnostics.filter(d => {
+    if (filter === 'failed' && !d.attempts.some(a => a.errorMessage && a.errorCode !== 'AlreadyExists')) return false
+    if (filter === 'nomatch' && d.matchedGuids.length > 0) return false
+    const q = search.toLowerCase()
+    if (q && !d.projectName.toLowerCase().includes(q) && !d.poFieldName.toLowerCase().includes(q)) return false
+    return true
+  })
+
+  function exportJson() {
+    const blob = new Blob([JSON.stringify(diagnostics, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'association-diagnostics.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const filterBtn = (f: AssocFilter, label: string) => (
+    <Button
+      size="small"
+      appearance={filter === f ? 'primary' : 'secondary'}
+      onClick={() => setFilter(f)}
+    >
+      {label}
+    </Button>
+  )
+
+  if (diagnostics.length === 0) {
+    return (
+      <div className={styles.panel}>
+        <div className={styles.sectionTitle}>N:N Association Diagnostics</div>
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            No N:N association attempts recorded. This means no LookupMulti fields with N:N mapping were processed.
+            Possible causes: no LookupMulti fields in mapping, all fields set to skip, or writer logic was not invoked.
+          </MessageBarBody>
+        </MessageBar>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles.panel}>
+      <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
+        <div className={styles.sectionTitle}>N:N Association Diagnostics</div>
+        <Button size="small" onClick={exportJson}>Export JSON</Button>
+      </div>
+
+      <div className={styles.muted} style={{ marginBottom: '10px' }}>
+        {projectCount} project{projectCount !== 1 ? 's' : ''} · {diagnostics.length} field mapping{diagnostics.length !== 1 ? 's' : ''} · {totalAttempts} attempt{totalAttempts !== 1 ? 's' : ''} · {totalSucceeded} OK · {totalFailed} failed
+      </div>
+
+      <div className={styles.assocFilterBar}>
+        {filterBtn('all', 'All')}
+        {filterBtn('failed', 'Only failed')}
+        {filterBtn('nomatch', 'Only no matches')}
+        <input
+          className={styles.assocSearchInput}
+          placeholder="Search project or field…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className={styles.muted}>No entries match the current filter.</div>
+      ) : (
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              <th className={styles.th}>Project</th>
+              <th className={styles.th}>PO Field</th>
+              <th className={styles.th}>Target Entity</th>
+              <th className={styles.th} style={{ textAlign: 'right' }}>Requested</th>
+              <th className={styles.th} style={{ textAlign: 'right' }}>Matched</th>
+              <th className={styles.th} style={{ textAlign: 'right' }}>Attempts</th>
+              <th className={styles.th}>Status</th>
+              <th className={styles.th} style={{ width: '32px' }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((d, idx) => {
+              const rowKey = `${d.projectId}::${d.poFieldName}::${idx}`
+              const expanded = expandedRows.has(rowKey)
+              const st = assocStatus(d)
+              return (
+                <>
+                  <tr key={rowKey} style={{ cursor: 'pointer' }} onClick={() => toggleRow(rowKey)}>
+                    <td className={styles.td}>{d.projectName}</td>
+                    <td className={`${styles.td} ${styles.code}`}>{d.poFieldName}</td>
+                    <td className={`${styles.td} ${styles.code}`}>{d.targetEntitySetName}</td>
+                    <td className={styles.td} style={{ textAlign: 'right' }}>{d.requestedLabels.length}</td>
+                    <td className={styles.td} style={{ textAlign: 'right' }}>{d.matchedGuids.length}</td>
+                    <td className={styles.td} style={{ textAlign: 'right' }}>{d.attempts.length}</td>
+                    <td className={styles.td}>
+                      <span className={st.cls === 'ok' ? styles.statusOk : st.cls === 'warn' ? styles.statusWarn : styles.statusFail}>
+                        {st.label}
+                      </span>
+                    </td>
+                    <td className={styles.td}>{expanded ? '▲' : '▼'}</td>
+                  </tr>
+                  {expanded && (
+                    <tr key={`${rowKey}::detail`}>
+                      <td colSpan={8} className={styles.td} style={{ padding: '0 10px 12px' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '8px', fontSize: '12px' }}>
+                          <div>
+                            <strong>Requested ({d.requestedLabels.length})</strong>
+                            <div className={styles.code} style={{ marginTop: '4px' }}>
+                              {d.requestedLabels.length === 0 ? <span className={styles.muted}>—</span> : d.requestedLabels.join(', ')}
+                            </div>
+                          </div>
+                          <div>
+                            <strong>Matched GUIDs ({d.matchedGuids.length})</strong>
+                            <div className={styles.code} style={{ marginTop: '4px' }}>
+                              {d.matchedGuids.length === 0 ? <span className={styles.muted}>—</span> : d.matchedGuids.join('\n')}
+                            </div>
+                          </div>
+                          {d.failedLabels.length > 0 && (
+                            <div>
+                              <strong className={styles.statusFail}>Not matched ({d.failedLabels.length})</strong>
+                              <div className={styles.code} style={{ marginTop: '4px' }}>{d.failedLabels.join(', ')}</div>
+                            </div>
+                          )}
+                        </div>
+
+                        {d.attempts.length === 0 ? (
+                          <div className={styles.statusWarn} style={{ marginTop: '10px', fontSize: '12px' }}>
+                            No associate attempts made — matchedGuids was empty or loop was not reached.
+                          </div>
+                        ) : (
+                          <div style={{ marginTop: '10px' }}>
+                            <strong style={{ fontSize: '12px' }}>Attempts ({d.attempts.length})</strong>
+                            {d.attempts.map((attempt, ai) => {
+                              const attemptKey = `${rowKey}::attempt::${ai}`
+                              const attemptExpanded = expandedAttempts.has(attemptKey)
+                              const hasError = attempt.errorMessage && attempt.errorCode !== 'AlreadyExists'
+                              return (
+                                <div key={attemptKey} style={{ marginTop: '6px', border: `1px solid ${tokens.colorNeutralStroke2}`, borderRadius: '4px', overflow: 'hidden' }}>
+                                  <div
+                                    style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', background: tokens.colorNeutralBackground3, cursor: 'pointer', fontSize: '12px' }}
+                                    onClick={e => { e.stopPropagation(); toggleAttempt(attemptKey) }}
+                                  >
+                                    <span className={styles.code} style={{ flex: 1 }}>{attempt.targetGuid}</span>
+                                    <span className={hasError ? styles.statusFail : styles.statusOk}>
+                                      HTTP {attempt.httpStatus ?? '?'}{attempt.errorCode ? ` (${attempt.errorCode})` : ''}
+                                    </span>
+                                    <span className={styles.muted}>{attempt.durationMs}ms</span>
+                                    <span className={styles.muted}>{attemptExpanded ? '▲' : '▼'}</span>
+                                  </div>
+                                  {attemptExpanded && (
+                                    <div className={styles.assocDetail}>
+                                      <div><strong>URL:</strong> POST {attempt.url}</div>
+                                      <div style={{ marginTop: '6px' }}><strong>Body:</strong></div>
+                                      <div>{JSON.stringify(attempt.body, null, 2)}</div>
+                                      {attempt.errorMessage && (
+                                        <div style={{ marginTop: '6px' }}>
+                                          <strong className={styles.statusFail}>Error:</strong>
+                                          <span> {attempt.errorMessage}</span>
+                                        </div>
+                                      )}
+                                      <div style={{ marginTop: '6px' }} className={styles.muted}>{attempt.timestamp}</div>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  )
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function Step5Report() {
@@ -205,7 +447,7 @@ export function Step5Report() {
   const {
     importResults, prevStep, setCurrentStep,
     migrationMode, skippedFieldInstances, selectedSolution,
-    schemaCreationResults, resetState,
+    schemaCreationResults, resetState, associationDiagnostics,
     selectedProjectIds, fetchedData, setSelectedProjectIds,
   } = useMigration()
 
@@ -252,13 +494,15 @@ export function Step5Report() {
     const solutionName = selectedSolution?.uniquename ?? 'unknown'
     const date = new Date().toISOString().slice(0, 10)
     downloadCsv(`skipped-fields-${solutionName}-${date}.csv`, [
-      ['PO Field', 'Dataverse Field', 'Reason', 'Original Value', 'Source ID'],
+      ['PO Field', 'Dataverse Field', 'Reason', 'Original Value', 'Source ID', 'Failed Labels', 'Resolved Labels'],
       ...skippedFieldInstances.map(inst => [
         inst.poField,
         inst.dvField,
         inst.reason,
         String(inst.originalValue ?? ''),
         inst.sourceId,
+        inst.partialResolution?.failedLabels.join('|') ?? '',
+        inst.partialResolution?.resolvedLabels.join('|') ?? '',
       ]),
     ])
   }
@@ -512,6 +756,11 @@ export function Step5Report() {
         )}
       </div>
       </>
+      )}
+
+      {/* N:N Association Diagnostics — dataOnly mode only */}
+      {migrationMode === 'dataOnly' && (
+        <AssociationDiagnosticsPanel diagnostics={associationDiagnostics} />
       )}
 
       {/* Skipped Fields — dataOnly mode only */}

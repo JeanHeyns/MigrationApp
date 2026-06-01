@@ -211,6 +211,18 @@ export const client = getClient({
         ],
         responseInfo: { default: { type: 'object' } },
       },
+      // Create a N:N relationship between two entities
+      CreateManyToManyRelationship: {
+        path: '/{connectionId}/api/data/v9.2/RelationshipDefinitions',
+        method: 'POST',
+        parameters: [
+          { name: 'connectionId',             in: 'path',   required: true,  type: 'string' },
+          { name: 'organization',             in: 'header', required: true,  type: 'string' },
+          { name: 'MSCRM.SolutionUniqueName', in: 'header', required: false, type: 'string' },
+          { name: 'item',                     in: 'body',   required: true,  type: 'object' },
+        ],
+        responseInfo: { default: { type: 'object' } },
+      },
       // Schema inspection: ManyToOne relationships for navigation property lookup
       GetEntityManyToOneRelationships: {
         path: "/{connectionId}/api/data/v9.1.0/EntityDefinitions(LogicalName='{entityLogicalName}')/ManyToOneRelationships",

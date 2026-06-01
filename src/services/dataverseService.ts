@@ -5,7 +5,7 @@
  */
 import { client } from '../client'
 import { getDataverseOrgUrl } from '../config/environment'
-import type { GlobalOptionSetMeta } from '../models/dataOnly.types'
+import type { GlobalOptionSetMeta, NNRelationshipMeta } from '../models/dataOnly.types'
 
 type ListResult = { value?: unknown[]; '@odata.nextLink'?: string; 'odata.nextLink'?: string }
 
@@ -971,6 +971,185 @@ export async function fetchEntityManyToOneRelationships(entityLogicalName: strin
   if (!res.success) throw new Error(extractDvError(res))
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (((res.data as any)?.value ?? []) as RawRelationshipMeta[])
+}
+
+// ─── N:N relationship helpers ─────────────────────────────────────────────────
+
+interface RawNNRelationshipMeta {
+  SchemaName: string
+  IntersectEntityName: string
+  Entity1LogicalName: string
+  Entity2LogicalName: string
+  Entity1NavigationPropertyName: string
+  Entity2NavigationPropertyName: string
+}
+
+function normalizeNNRelationship(raw: RawNNRelationshipMeta, inspectedEntity: string): NNRelationshipMeta {
+  const targetEntityLogicalName = raw.Entity1LogicalName === inspectedEntity
+    ? raw.Entity2LogicalName
+    : raw.Entity1LogicalName
+  return {
+    schemaName: raw.SchemaName,
+    intersectEntityName: raw.IntersectEntityName,
+    entity1LogicalName: raw.Entity1LogicalName,
+    entity2LogicalName: raw.Entity2LogicalName,
+    entity1NavigationPropertyName: raw.Entity1NavigationPropertyName,
+    entity2NavigationPropertyName: raw.Entity2NavigationPropertyName,
+    targetEntityLogicalName,
+    targetEntitySetName: `${targetEntityLogicalName}s`,
+  }
+}
+
+export async function getEntityManyToManyRelationships(entityLogicalName: string): Promise<NNRelationshipMeta[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: getDataverseOrgUrl(),
+    accept: 'application/json',
+    entityLogicalName,
+    '$select': 'LogicalName',
+    '$expand': 'ManyToManyRelationships($select=SchemaName,IntersectEntityName,Entity1LogicalName,Entity2LogicalName,Entity1NavigationPropertyName,Entity2NavigationPropertyName)',
+  }
+
+  const res = await client.executeAsync<typeof params, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'GetEntityDefinition',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = res.data as any
+  return ((raw?.ManyToManyRelationships ?? []) as RawNNRelationshipMeta[]).map(r => normalizeNNRelationship(r, entityLogicalName))
+}
+
+export async function createManyToManyRelationship(params: {
+  schemaName: string
+  entity1LogicalName: string
+  entity2LogicalName: string
+  entity1Label: string
+  entity2Label: string
+  solutionUniqueName: string
+}): Promise<void> {
+  const { schemaName, entity1LogicalName, entity2LogicalName, entity1Label, entity2Label, solutionUniqueName } = params
+  const makeLabel = (text: string) => ({
+    '@odata.type': 'Microsoft.Dynamics.CRM.Label',
+    LocalizedLabels: [{
+      '@odata.type': 'Microsoft.Dynamics.CRM.LocalizedLabel',
+      Label: text,
+      LanguageCode: 1033,
+    }],
+    UserLocalizedLabel: {
+      '@odata.type': 'Microsoft.Dynamics.CRM.LocalizedLabel',
+      Label: text,
+      LanguageCode: 1033,
+    },
+  })
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const reqParams: Record<string, any> = {
+    organization: getDataverseOrgUrl(),
+    'MSCRM.SolutionUniqueName': solutionUniqueName,
+    item: {
+      '@odata.type': 'Microsoft.Dynamics.CRM.ManyToManyRelationshipMetadata',
+      SchemaName: schemaName,
+      Entity1LogicalName: entity1LogicalName,
+      Entity2LogicalName: entity2LogicalName,
+      Entity1AssociatedMenuConfiguration: {
+        Behavior: 'UseCollectionName',
+        Group: 'Details',
+        Order: 10000,
+        Label: makeLabel(entity1Label),
+      },
+      Entity2AssociatedMenuConfiguration: {
+        Behavior: 'UseCollectionName',
+        Group: 'Details',
+        Order: 10000,
+        Label: makeLabel(entity2Label),
+      },
+    },
+  }
+
+  const res = await client.executeAsync<typeof reqParams, Record<string, unknown>>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'CreateManyToManyRelationship',
+      parameters: reqParams,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+}
+
+export async function associateNNRecord(
+  entitySetName: string,
+  recordId: string,
+  navigationPropertyName: string,
+  targetEntitySetName: string,
+  targetId: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: getDataverseOrgUrl(),
+    entityName: entitySetName,
+    recordId,
+    associationEntityRelationship: navigationPropertyName,
+    item: {
+      '@odata.id': `${getDataverseOrgUrl()}/api/data/v9.1.0/${targetEntitySetName}(${targetId})`,
+    },
+  }
+
+  const res = await client.executeAsync<typeof params, void>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'AssociateEntitiesWithOrganization',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+}
+
+export async function disassociateNNRecord(
+  entitySetName: string,
+  recordId: string,
+  navigationPropertyName: string,
+  targetId: string,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const params: Record<string, any> = {
+    organization: getDataverseOrgUrl(),
+    entityName: entitySetName,
+    recordId,
+    associationEntityRelationship: navigationPropertyName,
+    $id: targetId,
+  }
+
+  const res = await client.executeAsync<typeof params, void>({
+    connectorOperation: {
+      tableName: 'commondataserviceforapps',
+      operationName: 'DisassociateEntitiesWithOrganization',
+      parameters: params,
+    },
+  })
+
+  if (!res.success) throw new Error(extractDvError(res))
+}
+
+export async function listAssociatedNNRecords(
+  entitySetName: string,
+  recordId: string,
+  navigationPropertyName: string,
+  targetIdField: string,
+): Promise<string[]> {
+  const rows = await listRecords(
+    `${entitySetName}(${recordId})/${navigationPropertyName}`,
+    targetIdField,
+    undefined,
+    5000,
+  )
+  return rows.map(r => String(r[targetIdField] ?? '')).filter(Boolean)
 }
 
 export async function fetchGlobalOptionSetFull(name: string): Promise<GlobalOptionSetMeta | null> {

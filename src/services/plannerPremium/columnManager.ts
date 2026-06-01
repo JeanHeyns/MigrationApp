@@ -209,7 +209,8 @@ export async function createColumns(
   solutionUniqueName: string,
   onProgress: (result: ColumnCreateResult) => void,
 ): Promise<ColumnCreateResult[]> {
-  const active = fieldMappings.filter(fm => !fm.skip && !fm.useExistingField)
+  // LookupMulti fields are handled via N:N relationships (schemaOrchestrator), not as columns
+  const active = fieldMappings.filter(fm => !fm.skip && !fm.useExistingField && fm.customField.CustomFieldType !== 'LookupMulti')
   const results: ColumnCreateResult[] = []
 
   for (const fm of active) {

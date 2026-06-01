@@ -114,3 +114,26 @@ export interface LogEntry {
   level: 'info' | 'success' | 'error' | 'warning'
   message: string
 }
+
+export interface AssociationAttemptRecord {
+  targetGuid: string
+  url: string
+  body: Record<string, unknown>
+  httpStatus?: number
+  errorCode?: string
+  errorMessage?: string
+  durationMs: number
+  timestamp: string
+}
+
+export interface AssociationAttempt {
+  projectId: string
+  projectName: string
+  poFieldName: string
+  targetEntitySetName: string
+  navigationPropertyName: string
+  requestedLabels: string[]
+  matchedGuids: string[]
+  failedLabels: string[]
+  attempts: AssociationAttemptRecord[]
+}
