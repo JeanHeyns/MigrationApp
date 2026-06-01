@@ -337,6 +337,18 @@ function buildDataOnlyMultiLookupMappings(data: PoFetchedData, snapshot: SchemaS
     })
 }
 
+function activeMultiLookupMappings(
+  fieldMappings: FieldMapping[],
+  multiLookupMappings: MultiLookupMapping[],
+): MultiLookupMapping[] {
+  const activeLookupMultiFields = new Set(
+    fieldMappings
+      .filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti')
+      .map(m => m.customField.ODataFieldName || m.customField.CustomFieldName),
+  )
+  return multiLookupMappings.filter(ml => activeLookupMultiFields.has(ml.poFieldName))
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function buildInitialMappings(data: PoFetchedData, prefix: string): FieldMapping[] {
@@ -566,7 +578,12 @@ export function Step2Mapping() {
   }
 
   function setFieldSkip(idx: number, skip: boolean) {
+    const mapping = fieldMappings[idx]
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, skip } : m))
+    if (skip && mapping?.customField.CustomFieldType === 'LookupMulti') {
+      const poFieldName = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
+      setMultiLookupMappingsState(prev => prev.filter(ml => ml.poFieldName !== poFieldName))
+    }
   }
 
   function setFieldRelatedEntity(idx: number, logicalName: string) {
@@ -732,6 +749,7 @@ export function Step2Mapping() {
   // ── Save / Load JSON ─────────────────────────────────────────────────────
 
   function handleSaveJson() {
+    const multiLookups = activeMultiLookupMappings(fieldMappings, multiLookupMappingsState)
     const config: MappingConfiguration = {
       siteUrl: fetchedData?.pwaUrl ?? '',
       publisherPrefix: prefix,
@@ -739,7 +757,7 @@ export function Step2Mapping() {
       migrationMode,
       fieldMappings,
       ownerMappings: [],
-      multiLookups: multiLookupMappingsState,
+      multiLookups,
       savedAt: new Date().toISOString(),
     }
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
@@ -800,6 +818,7 @@ export function Step2Mapping() {
   // ── Next step ─────────────────────────────────────────────────────────────
 
   function handleNext() {
+    const multiLookups = activeMultiLookupMappings(fieldMappings, multiLookupMappingsState)
     const config: MappingConfiguration = {
       siteUrl: fetchedData?.pwaUrl ?? '',
       publisherPrefix: prefix,
@@ -807,7 +826,7 @@ export function Step2Mapping() {
       migrationMode,
       fieldMappings,
       ownerMappings: [],
-      multiLookups: multiLookupMappingsState,
+      multiLookups,
       savedAt: new Date().toISOString(),
     }
     setMappingConfig(config)

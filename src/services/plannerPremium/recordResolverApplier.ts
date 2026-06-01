@@ -103,8 +103,15 @@ export function applyResolvers(
     }
   }
 
-  // Separate loop for N:N multi-lookup fields (not in fieldMappings due to skip/no-column)
+  const activeLookupMultiFields = new Set(
+    fieldMappings
+      .filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti')
+      .map(m => m.customField.ODataFieldName || m.customField.CustomFieldName),
+  )
+
+  // Separate loop for active N:N multi-lookup fields (not in fieldMappings due to skip/no-column)
   for (const mlMapping of (multiLookupMappings ?? [])) {
+    if (!activeLookupMultiFields.has(mlMapping.poFieldName)) continue
     if (mlMapping.targetShape === 'MultiChoice') continue
 
     const resolver = resolvers.get(mlMapping.poFieldName)

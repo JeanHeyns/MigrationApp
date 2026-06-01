@@ -374,9 +374,16 @@ export function Step4Import() {
           addLog({ level: w.severity === 'error' ? 'error' : 'warning', message: `Resolver build — ${w.field}: ${w.message}` })
         }
 
-        // Build multi-lookup resolvers for N:N fields (MultiChoice handled by buildResolverMap)
+        const activeMultiLookupFields = new Set(
+          config.fieldMappings
+            .filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti')
+            .map(m => m.customField.ODataFieldName || m.customField.CustomFieldName),
+        )
+
+        // Build multi-lookup resolvers for active N:N fields (MultiChoice handled by buildResolverMap)
         const mlWarnings: ResolverBuildWarning[] = []
         for (const mlMapping of (mappingConfig?.multiLookups ?? [])) {
+          if (!activeMultiLookupFields.has(mlMapping.poFieldName)) continue
           if (mlMapping.targetShape === 'MultiChoice') continue
           try {
             const mlResolver = await buildMultiLookupResolverDataOnly(mlMapping, mlWarnings)
