@@ -88,6 +88,19 @@ export async function buildFullModeResolverMap(
     const resolver = await buildFullModeFieldResolver(mapping, optionSetMappings, multiLookupMappings)
     if (resolver) resolvers.set(fieldKey, resolver)
   }
+  // N:N associations don't go into the PATCH payload, so migrateValue is irrelevant for them.
+  // Build resolvers for any N:N multi-lookup fields not yet covered by the loop above.
+  for (const mlMapping of (multiLookupMappings ?? [])) {
+    if (mlMapping.targetShape !== 'N:N') continue
+    if (resolvers.has(mlMapping.poFieldName)) continue
+    const fieldMapping = fieldMappings.find(
+      m => !m.skip && (m.customField.ODataFieldName || m.customField.CustomFieldName) === mlMapping.poFieldName,
+    )
+    if (fieldMapping) {
+      const resolver = await buildMultiLookupResolverFullMode(fieldMapping, mlMapping)
+      resolvers.set(mlMapping.poFieldName, resolver)
+    }
+  }
   return resolvers
 }
 
@@ -344,6 +357,7 @@ function buildDirectResolver(entry: ResolverEntry): FieldResolver {
 // ─── Option set helpers ───────────────────────────────────────────────────────
 
 const normalize = (s: string) => s.toLowerCase().trim()
+const normalizeGuid = (s: string) => s.replace(/[{}]/g, '').toLowerCase().trim()
 
 async function fetchOptionSet(
   name: string,
@@ -725,7 +739,7 @@ function normalizeMultiLookupInput(raw: unknown, sourceMap?: Map<string, string>
 
   if (!sourceMap) return unique
   // Map PO GUIDs → labels; pass through non-GUID tokens unchanged
-  return unique.map(t => sourceMap.get(t) ?? t)
+  return unique.map(t => sourceMap.get(t) ?? sourceMap.get(normalizeGuid(t)) ?? t)
 }
 
 async function fetchMultiLookupLabelMap(
@@ -853,7 +867,10 @@ async function buildMultiLookupResolverFullMode(
   // Build sourceMap: PO GUID → PO label for input normalisation
   const sourceMap = new Map<string, string>()
   for (const entry of mapping.lookupTable?.entries ?? []) {
-    sourceMap.set(entry.LookupEntryUID, entry.LookupEntryFullValue ?? entry.LookupEntryValue ?? '')
+    const label = entry.LookupEntryFullValue ?? entry.LookupEntryValue ?? ''
+    if (!entry.LookupEntryUID || !label) continue
+    sourceMap.set(entry.LookupEntryUID, label)
+    sourceMap.set(normalizeGuid(entry.LookupEntryUID), label)
   }
 
   return buildMultiLookupResolverFromMap(labelMap, sourceMap.size > 0 ? sourceMap : undefined)
@@ -862,6 +879,7 @@ async function buildMultiLookupResolverFullMode(
 export async function buildMultiLookupResolverDataOnly(
   mlMapping: MultiLookupMapping,
   warnings: ResolverBuildWarning[],
+  fieldMapping?: FieldMapping,
 ): Promise<FieldResolver> {
   if (mlMapping.targetShape === 'MultiChoice') return unresolvedResolver('Lookup')
   const labelMap = await fetchMultiLookupLabelMap(mlMapping, warnings)
@@ -880,7 +898,21 @@ export async function buildMultiLookupResolverDataOnly(
     return unresolvedResolver('Lookup')
   }
 
-  return buildMultiLookupResolverFromMap(labelMap)
+  // Build sourceMap for GUID→label translation, same as full mode.
+  // PO sends GUIDs for LookupMulti fields; without this map they won't match DV labels.
+  let sourceMap: Map<string, string> | undefined
+  const entries = fieldMapping?.lookupTable?.entries ?? []
+  if (entries.length > 0) {
+    sourceMap = new Map()
+    for (const entry of entries) {
+      const label = entry.LookupEntryFullValue ?? entry.LookupEntryValue ?? ''
+      if (!entry.LookupEntryUID || !label) continue
+      sourceMap.set(entry.LookupEntryUID, label)
+      sourceMap.set(normalizeGuid(entry.LookupEntryUID), label)
+    }
+  }
+
+  return buildMultiLookupResolverFromMap(labelMap, sourceMap?.size ? sourceMap : undefined)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -386,7 +386,10 @@ export function Step4Import() {
           if (!activeMultiLookupFields.has(mlMapping.poFieldName)) continue
           if (mlMapping.targetShape === 'MultiChoice') continue
           try {
-            const mlResolver = await buildMultiLookupResolverDataOnly(mlMapping, mlWarnings)
+            const fieldMapping = config.fieldMappings.find(
+              m => (m.customField.ODataFieldName || m.customField.CustomFieldName) === mlMapping.poFieldName,
+            )
+            const mlResolver = await buildMultiLookupResolverDataOnly(mlMapping, mlWarnings, fieldMapping)
             resolvers.set(mlMapping.poFieldName, mlResolver)
           } catch (e) {
             appendLog(`[Resolver ERROR] ${mlMapping.poFieldName}: ${String(e)}`)

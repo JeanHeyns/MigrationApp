@@ -16,6 +16,7 @@ import {
   fetchEntityWithCustomAttributes,
   fetchGlobalOptionSetFull,
   getEntityManyToManyRelationships,
+  listAllRecords,
   type AttributeOptionSetMetadata,
   type EntityWithCustomAttributes,
   type OptionSetDebugAttempt,
@@ -101,6 +102,14 @@ interface TroubleData {
   multiPicklists: RawPicklistAttributeMeta[]
 }
 
+interface LutCompareResult {
+  dvLabels: string[]
+  poLutLabels: string[]
+  matches: Array<{ poLabel: string; dvMatch: string | null }>
+  unmatchedDv: string[]
+  rawPoSamples: string[]
+}
+
 function pretty(value: unknown): string {
   if (value === undefined) return 'undefined'
   return JSON.stringify(value, null, 2)
@@ -122,7 +131,7 @@ function choiceAttributeType(rawAttribute: EntityWithCustomAttributes['rawAttrs'
 
 export function Troubleshooting() {
   const styles = useStyles()
-  const { schemaSnapshot, setCurrentStep, projectWriteDiagnostics, fetchedData } = useMigration()
+  const { schemaSnapshot, setCurrentStep, projectWriteDiagnostics, fetchedData, mappingConfig } = useMigration()
   const [entityName, setEntityName] = useState(TARGET_ENTITIES[0].logicalName)
   const [fieldName, setFieldName] = useState('')
   const [projectDiagnosticId, setProjectDiagnosticId] = useState('')
@@ -136,6 +145,25 @@ export function Troubleshooting() {
   const [nnFetching, setNnFetching] = useState(false)
   const [nnRaw, setNnRaw] = useState<NNRelationshipMeta[] | null>(null)
   const [nnError, setNnError] = useState<string | null>(null)
+
+  // LUT comparison state
+  const [lutPoField, setLutPoField] = useState('')
+  const [lutFetching, setLutFetching] = useState(false)
+  const [lutResult, setLutResult] = useState<LutCompareResult | null>(null)
+  const [lutError, setLutError] = useState<string | null>(null)
+
+  const nnMappings = useMemo(
+    () => (mappingConfig?.multiLookups ?? []).filter(
+      ml => ml.targetShape === 'N:N' && ml.targetEntitySetName && ml.matchFieldLogicalName,
+    ),
+    [mappingConfig],
+  )
+
+  useEffect(() => {
+    if (!lutPoField && nnMappings.length > 0) setLutPoField(nnMappings[0].poFieldName)
+  }, [nnMappings, lutPoField])
+
+  const selectedNnMapping = nnMappings.find(ml => ml.poFieldName === lutPoField)
 
   const snapshotEntity = schemaSnapshot?.entities[entityName]
   const snapshotColumn = snapshotEntity?.attributes.find(a => a.logicalName === fieldName)
@@ -206,6 +234,72 @@ export function Troubleshooting() {
 
     return [...fields.values()].sort((a, b) => a.label.localeCompare(b.label))
   }, [data?.entity.rawAttrs, snapshotEntity?.attributes])
+
+  async function fetchLutComparison() {
+    const ml = selectedNnMapping
+    if (!ml?.targetEntitySetName || !ml?.matchFieldLogicalName) return
+
+    setLutFetching(true)
+    setLutError(null)
+    setLutResult(null)
+
+    try {
+      const records = await listAllRecords(ml.targetEntitySetName, [ml.matchFieldLogicalName])
+      const dvLabels = records
+        .map(r => String(r[ml.matchFieldLogicalName!] ?? '').trim())
+        .filter(Boolean)
+      const dvNormMap = new Map(dvLabels.map(l => [l.toLowerCase(), l]))
+
+      const poFieldMapping = mappingConfig?.fieldMappings.find(
+        fm => (fm.customField.ODataFieldName || fm.customField.CustomFieldName) === ml.poFieldName,
+      )
+      const sourceKeys = [
+        ml.poFieldName,
+        poFieldMapping?.customField.ODataFieldName,
+        poFieldMapping?.customField.CustomFieldName,
+      ].filter((value, index, values): value is string =>
+        typeof value === 'string' && value.length > 0 && values.indexOf(value) === index
+      )
+      const seenPo = new Set<string>()
+      const poLutLabels: string[] = []
+      for (const entry of poFieldMapping?.lookupTable?.entries ?? []) {
+        const label = entry.LookupEntryFullValue || entry.LookupEntryValue || ''
+        if (!label) continue
+        const key = label.toLowerCase()
+        if (seenPo.has(key)) continue
+        seenPo.add(key)
+        poLutLabels.push(label)
+      }
+
+      const matches = poLutLabels.map(poLabel => ({
+        poLabel,
+        dvMatch: dvNormMap.get(poLabel.toLowerCase()) ?? null,
+      }))
+
+      const matchedDvKeys = new Set(matches.filter(m => m.dvMatch).map(m => m.dvMatch!.toLowerCase()))
+      const unmatchedDv = dvLabels.filter(l => !matchedDvKeys.has(l.toLowerCase()))
+
+      const seenRaw = new Set<string>()
+      const rawPoSamples: string[] = []
+      for (const project of (fetchedData?.projects ?? [])) {
+        const key = sourceKeys.find(k => project[k] !== undefined)
+        const val = key ? project[key] : undefined
+        if (val == null || val === '') continue
+        const str = String(val)
+        if (!seenRaw.has(str)) {
+          seenRaw.add(str)
+          rawPoSamples.push(str)
+        }
+        if (rawPoSamples.length >= 20) break
+      }
+
+      setLutResult({ dvLabels, poLutLabels, matches, unmatchedDv, rawPoSamples })
+    } catch (e) {
+      setLutError(String(e))
+    } finally {
+      setLutFetching(false)
+    }
+  }
 
   async function loadEntity(selectedEntity = entityName) {
     setLoading(true)
@@ -495,6 +589,118 @@ export function Troubleshooting() {
             </pre>
           </section>
         </div>
+      </section>
+
+      {/* ── N:N Lookup Value Comparison ── */}
+      <section className={styles.fullPanel}>
+        <div className={styles.panelTitle}>N:N Lookup Value Comparison</div>
+        <div className={styles.subtitle} style={{ marginBottom: '12px' }}>
+          Compare PO lookup table entries against Dataverse lookup entity records. Reveals why values fail to match during import.
+        </div>
+
+        {nnMappings.length === 0 ? (
+          <MessageBar intent="warning">
+            <MessageBarBody>
+              No N:N multi-lookup mappings configured. Set up N:N mappings in Step 2 (select relationship + match field) and load this page again.
+            </MessageBarBody>
+          </MessageBar>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '12px', flexWrap: 'wrap' }}>
+              <label className={styles.field} style={{ minWidth: '300px' }}>
+                <span className={styles.label}>N:N Multi-lookup Field</span>
+                <Select
+                  value={lutPoField}
+                  onChange={(_, d) => { setLutPoField(d.value); setLutResult(null) }}
+                >
+                  {nnMappings.map(ml => (
+                    <option key={ml.poFieldName} value={ml.poFieldName}>{ml.poFieldName}</option>
+                  ))}
+                </Select>
+              </label>
+              {selectedNnMapping && (
+                <div style={{ fontSize: '12px', color: tokens.colorNeutralForeground3, paddingBottom: '6px' }}>
+                  Entity: <code>{selectedNnMapping.targetEntitySetName}</code> · Match field: <code>{selectedNnMapping.matchFieldLogicalName}</code>
+                </div>
+              )}
+              <Button onClick={fetchLutComparison} disabled={lutFetching || !selectedNnMapping}>
+                {lutFetching ? 'Fetching…' : 'Fetch & Compare'}
+              </Button>
+            </div>
+
+            {lutError && (
+              <MessageBar intent="error" style={{ marginBottom: '10px' }}>
+                <MessageBarBody>{lutError}</MessageBarBody>
+              </MessageBar>
+            )}
+
+            {lutResult && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px' }}>
+                <section className={styles.panel}>
+                  <div className={styles.panelTitle}>
+                    PO Lookup Table → DV ({lutResult.matches.filter(m => m.dvMatch).length}/{lutResult.matches.length} matched)
+                  </div>
+                  {lutResult.matches.length === 0 ? (
+                    <div style={{ fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                      No PO lookup table entries found for this field. Check the mapping has a lookup table attached.
+                    </div>
+                  ) : (
+                    <div style={{ maxHeight: '380px', overflowY: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                        <thead>
+                          <tr>
+                            <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: `1px solid ${tokens.colorNeutralStroke1}`, fontWeight: '600' }}>PO label</th>
+                            <th style={{ textAlign: 'left', padding: '4px 8px', borderBottom: `1px solid ${tokens.colorNeutralStroke1}`, fontWeight: '600' }}>DV match</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {lutResult.matches.map((m, i) => (
+                            <tr key={i} style={{ background: i % 2 === 0 ? 'transparent' : tokens.colorNeutralBackground2 }}>
+                              <td style={{ padding: '3px 8px', fontFamily: 'Consolas, monospace', wordBreak: 'break-all' }}>{m.poLabel}</td>
+                              <td style={{ padding: '3px 8px', color: m.dvMatch ? tokens.colorPaletteGreenForeground1 : tokens.colorPaletteRedForeground1, fontFamily: 'Consolas, monospace' }}>
+                                {m.dvMatch ? `✓ ${m.dvMatch}` : '✗ niet gevonden'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+
+                <section className={styles.panel}>
+                  <div className={styles.panelTitle}>
+                    DV Records — {selectedNnMapping?.matchFieldLogicalName} ({lutResult.dvLabels.length} waarden{lutResult.unmatchedDv.length > 0 ? `, ${lutResult.unmatchedDv.length} niet gematcht` : ''})
+                  </div>
+                  <div style={{ maxHeight: '380px', overflowY: 'auto' }}>
+                    <pre className={styles.pre} style={{ maxHeight: 'none', margin: 0 }}>
+                      {lutResult.dvLabels.length === 0 ? '(geen records gevonden)' : lutResult.dvLabels.join('\n')}
+                    </pre>
+                  </div>
+                  {lutResult.unmatchedDv.length > 0 && (
+                    <div style={{ marginTop: '8px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
+                      <strong>Niet gematcht door PO:</strong> {lutResult.unmatchedDv.join(', ')}
+                    </div>
+                  )}
+                </section>
+
+                <section className={styles.panel}>
+                  <div className={styles.panelTitle}>
+                    Ruwe PO projectwaarden ({lutResult.rawPoSamples.length} uniek{lutResult.rawPoSamples.length === 20 ? ', afgekapt' : ''})
+                  </div>
+                  <pre className={styles.pre}>
+                    {lutResult.rawPoSamples.length === 0
+                      ? '(geen waarden gevonden in projectdata)'
+                      : lutResult.rawPoSamples.join('\n')}
+                  </pre>
+                  <div style={{ fontSize: '11px', color: tokens.colorNeutralForeground3, marginTop: '8px' }}>
+                    Exacte waarden die PO stuurt per project. GUIDs worden via de PO lookup tabel vertaald voordat ze tegen Dataverse labels matchen.
+                  </div>
+                </section>
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       <div className={styles.footer}>

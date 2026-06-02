@@ -108,6 +108,11 @@ export function applyResolvers(
       .filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti')
       .map(m => m.customField.ODataFieldName || m.customField.CustomFieldName),
   )
+  const fieldMappingByKey = new Map(
+    fieldMappings
+      .filter(m => m.customField.CustomFieldType === 'LookupMulti')
+      .map(m => [m.customField.ODataFieldName || m.customField.CustomFieldName, m]),
+  )
 
   // Separate loop for active N:N multi-lookup fields (not in fieldMappings due to skip/no-column)
   for (const mlMapping of (multiLookupMappings ?? [])) {
@@ -117,7 +122,16 @@ export function applyResolvers(
     const resolver = resolvers.get(mlMapping.poFieldName)
     if (!resolver) continue
 
-    const poValue = poRecord[mlMapping.poFieldName]
+    const fieldMapping = fieldMappingByKey.get(mlMapping.poFieldName)
+    const odataFieldName = fieldMapping?.customField.ODataFieldName
+    const customFieldName = fieldMapping?.customField.CustomFieldName
+    const poValue = poRecord[mlMapping.poFieldName] !== undefined
+      ? poRecord[mlMapping.poFieldName]
+      : odataFieldName && poRecord[odataFieldName] !== undefined
+        ? poRecord[odataFieldName]
+        : customFieldName
+          ? poRecord[customFieldName]
+          : undefined
     const result = resolver.resolve(poValue)
     if (result.status === 'empty') continue
 

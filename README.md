@@ -80,6 +80,13 @@ The template path supports project metadata, tasks, resources, assignments, depe
 
 The Power Platform app is packaged as the managed solution `MigrationToolApp`.
 
+Latest exported solution:
+
+```text
+File: powerplatform/solutions/MigrationToolApp_managed.zip
+Exported: 2026-06-02
+```
+
 Download the latest exported managed solution from this repository:
 
 [Download MigrationToolApp managed solution](https://github.com/JeanHeyns/MigrationApp/raw/main/powerplatform/solutions/MigrationToolApp_managed.zip)
