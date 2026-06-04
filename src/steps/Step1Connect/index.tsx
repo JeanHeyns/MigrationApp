@@ -19,10 +19,7 @@ import { ArrowUploadRegular, ArrowDownloadRegular } from '@fluentui/react-icons'
 import { useMigration } from '../../app/MigrationContext'
 import type { MigrationScope } from '../../app/MigrationContext'
 import { fetchProjects, isMigratableProject } from '../../services/projectOnline/projects'
-import { fetchTasks } from '../../services/projectOnline/tasks'
-import { fetchDependencies } from '../../services/projectOnline/dependencies'
 import { fetchResources } from '../../services/projectOnline/resources'
-import { fetchAssignments, fetchTeamMembers } from '../../services/projectOnline/assignments'
 import { fetchCustomFields } from '../../services/projectOnline/customFields'
 import { fetchLookupTables } from '../../services/projectOnline/lookupTables'
 import { fetchSolutions } from '../../services/plannerPremium/dataverseClient'
@@ -390,19 +387,9 @@ export function Step1Connect() {
     type FetchStep = { key: keyof PoFetchedData; fn: () => Promise<unknown[]> }
     const fullSteps: FetchStep[] = [
       { key: 'projects',     fn: () => fetchProjects(url) },
-      ...(migrationScope.tasks ? [
-        { key: 'tasks' as const, fn: () => fetchTasks(url) },
-        ...(migrationScope.dependencies ? [
-          { key: 'dependencies' as const, fn: () => fetchDependencies(url, data.projects) },
-        ] : []),
-      ] : []),
       ...(migrationScope.resources ? [
         { key: 'resources' as const, fn: () => fetchResources(url) },
       ] : []),
-      ...(migrationScope.assignments ? [
-        { key: 'assignments' as const, fn: () => fetchAssignments(url) },
-      ] : []),
-      { key: 'teamMembers',  fn: () => fetchTeamMembers(url) },
       { key: 'customFields', fn: () => fetchCustomFields(url) },
       { key: 'lookupTables', fn: () => fetchLookupTables(url) },
     ]
@@ -1183,19 +1170,9 @@ function buildFetchItems(mode: MigrationMode, scope: MigrationScope): FetchItem[
   const items: FetchItem[] = [
     { key: 'projects', label: 'Projects', status: 'pending', count: 0 },
   ]
-  if (scope.tasks) {
-    items.push({ key: 'tasks', label: 'Tasks', status: 'pending', count: 0 })
-    if (scope.dependencies) {
-      items.push({ key: 'dependencies', label: 'Dependencies', status: 'pending', count: 0 })
-    }
-  }
   if (scope.resources) {
     items.push({ key: 'resources', label: 'Resources', status: 'pending', count: 0 })
   }
-  if (scope.assignments) {
-    items.push({ key: 'assignments', label: 'Assignments', status: 'pending', count: 0 })
-  }
-  items.push({ key: 'teamMembers', label: 'Team Members', status: 'pending', count: 0 })
   items.push({ key: 'customFields', label: 'Custom Fields', status: 'pending', count: 0 })
   items.push({ key: 'lookupTables', label: 'Lookup Tables', status: 'pending', count: 0 })
   return items

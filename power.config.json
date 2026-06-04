@@ -1,6 +1,5 @@
 {
   "version": "1.0",
-  "appId": "b97a326f-a785-4fa5-b2b8-02a553443c09",
   "appDisplayName": "Project Online Migratietool",
   "region": "prod",
   "environmentId": "c6edcc15-13d9-ee59-b036-111a0b273446",
@@ -35,5 +34,6 @@
       "dataSets": {}
     }
   },
-  "databaseReferences": {}
+  "databaseReferences": {},
+  "appId": "968116b5-4bee-43ef-b7f0-e2757df8f583"
 }

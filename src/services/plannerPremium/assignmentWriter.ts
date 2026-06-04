@@ -3,7 +3,7 @@ import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords, performUnboundAction } from './dataverseClient'
 import { chunks, cleanGuid, getRecordId, nowError } from './importHelpers'
 import { classifyDataverseError } from './errorClassifier'
-import { createOperationSet, executeOperationSet, queueScheduleCreate } from './scheduleApi'
+import { executeOperationSetWithRetry } from './scheduleApi'
 
 export interface AssignmentWriteResult {
   poAssignmentId: string
@@ -25,14 +25,18 @@ export async function writeTeamMembers(
   const existingRows = await listRecords('msdyn_projectteams', 'msdyn_projectteamid,_msdyn_project_value,_msdyn_bookableresourceid_value', undefined, 5000)
 
   for (const teamMember of teamMembers) {
-    const resourceUid = getResourceUid(teamMember)
+    const resourceKeys = getResourceKeys(teamMember)
+    const resourceUid = resourceKeys[0] ?? ''
     const sourceId = `${teamMember.ProjectId}:${resourceUid}`
     try {
       const projectId = projectIdMap[teamMember.ProjectId]
-      const resourceId = resourceIdMap[resourceUid]
+      const resourceId = resolveMappedId(resourceIdMap, resourceKeys)
 
       if (!projectId || !resourceId) {
-        const result = { poAssignmentId: sourceId, success: false, error: nowError('TeamMember', sourceId, 'Project or bookable resource was not imported', undefined, teamMember.ProjectId) }
+        const message = !resourceUid
+          ? 'Team member has no resource id'
+          : 'Project or bookable resource was not imported'
+        const result = { poAssignmentId: sourceId, success: false, error: nowError('TeamMember', sourceId, message, undefined, teamMember.ProjectId) }
         results.push(result)
         onProgress?.(result)
         continue
@@ -92,7 +96,8 @@ export async function writeAssignments(
     const projectId = projectIdMap[poProjectId]
     if (!projectId) {
       for (const assignment of projectAssignments) {
-        const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${getResourceUid(assignment)}`
+        const resourceUid = getResourceKeys(assignment)[0] ?? ''
+        const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${resourceUid}`
         const result = { poAssignmentId: sourceId, success: false, error: nowError('Assignment', sourceId, 'Project was not imported', undefined, poProjectId) }
         results.push(result)
         onProgress?.(result)
@@ -106,79 +111,111 @@ export async function writeAssignments(
       `_msdyn_projectid_value eq ${projectId}`,
       5000,
     )
+    const existingByAssignmentKey = new Map<string, Record<string, unknown>>()
+    const seenAssignmentKeys = new Set<string>()
+    for (const row of existingRows) {
+      const key = assignmentKey(row['_msdyn_taskid_value'], row['_msdyn_projectteamid_value'])
+      if (!key) continue
+      existingByAssignmentKey.set(key, row)
+      seenAssignmentKeys.add(key)
+    }
 
     for (const chunk of chunks(projectAssignments, 180)) {
       const creatable = chunk.filter(assignment => {
-        const resourceUid = getResourceUid(assignment)
+        const resourceKeys = getResourceKeys(assignment)
+        const resourceUid = resourceKeys[0] ?? ''
         const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${resourceUid}`
         const taskId = taskIdMap[assignment.TaskId]
-        const teamMemberId = teamMemberIdMap[`${assignment.ProjectId}:${resourceUid}`]
-        const existingRow = existingRows.find(row =>
-          String(row['_msdyn_taskid_value']).toLowerCase() === String(taskId).toLowerCase() &&
-          String(row['_msdyn_projectteamid_value']).toLowerCase() === String(teamMemberId).toLowerCase()
+        const teamMemberId = resolveMappedId(
+          teamMemberIdMap,
+          resourceKeys.map(key => `${assignment.ProjectId}:${key}`),
         )
+        const key = assignmentKey(taskId, teamMemberId)
+        const existingRow = key ? existingByAssignmentKey.get(key) : undefined
 
-        if (!taskId || !teamMemberId || existingRow) {
+        if (!resourceUid || !taskId || !teamMemberId || existingRow || (key && seenAssignmentKeys.has(key))) {
+          const isDuplicate = key && seenAssignmentKeys.has(key) && !existingRow
+          const missingReason = [
+            !resourceUid ? 'resource id is missing' : null,
+            resourceUid && !taskId ? `task ${assignment.TaskId} was not imported or did not return a Dataverse task ID` : null,
+            resourceUid && !teamMemberId ? `project team member for resource ${resourceUid} was not imported` : null,
+          ].filter(Boolean).join('; ')
           const result = {
             poAssignmentId: sourceId,
             dvAssignmentId: existingRow ? cleanGuid(getRecordId(existingRow, 'msdyn_resourceassignmentid')) : undefined,
             success: !!existingRow,
-            error: existingRow ? undefined : nowError('Assignment', sourceId, 'Task or project team member was not imported'),
+            error: existingRow
+              ? undefined
+              : nowError(
+                'Assignment',
+                sourceId,
+                isDuplicate
+                  ? 'Duplicate assignment for the same task and project team member in source data'
+                  : `Cannot create assignment: ${missingReason}`,
+                isDuplicate ? 'AlreadyExists' : undefined,
+                poProjectId,
+              ),
           }
           results.push(result)
           onProgress?.(result)
           return false
         }
+        if (key) seenAssignmentKeys.add(key)
         return true
       })
 
       if (creatable.length === 0) continue
-      const operationSetId = await createOperationSet(projectId, `Project Online assignment import ${new Date().toISOString()}`)
-      let queued = 0
-      const queuedResults: AssignmentWriteResult[] = []
 
-      for (const assignment of creatable) {
-        const resourceUid = getResourceUid(assignment)
+      const ops = creatable.map(assignment => {
+        const resourceKeys = getResourceKeys(assignment)
+        const resourceUid = resourceKeys[0] ?? ''
         const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${resourceUid}`
-        try {
-          const assignmentId = crypto.randomUUID()
-          await queueScheduleCreate(operationSetId, {
+        const assignmentId = crypto.randomUUID()
+        const taskId = taskIdMap[assignment.TaskId]
+        const teamMemberId = resolveMappedId(
+          teamMemberIdMap,
+          resourceKeys.map(key => `${assignment.ProjectId}:${key}`),
+        )
+        return {
+          id: sourceId,
+          dvId: assignmentId,
+          entity: {
             '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_resourceassignment',
             msdyn_resourceassignmentid: assignmentId,
             msdyn_name: sourceId,
             'msdyn_projectid@odata.bind': `/msdyn_projects(${projectId})`,
-            'msdyn_taskid@odata.bind': `/msdyn_projecttasks(${taskIdMap[assignment.TaskId]})`,
-            'msdyn_projectteamid@odata.bind': `/msdyn_projectteams(${teamMemberIdMap[`${assignment.ProjectId}:${resourceUid}`]})`,
-          })
-          queued += 1
-          queuedResults.push({ poAssignmentId: sourceId, dvAssignmentId: assignmentId, success: true })
-        } catch (e) {
-          const errorClass = classifyDataverseError(e)
-          const result = { poAssignmentId: sourceId, success: false, error: nowError('Assignment', sourceId, String(e), errorClass !== 'Other' ? errorClass : undefined, poProjectId) }
-          results.push(result)
-          onProgress?.(result)
+            'msdyn_taskid@odata.bind': `/msdyn_projecttasks(${taskId})`,
+            'msdyn_projectteamid@odata.bind': `/msdyn_projectteams(${teamMemberId})`,
+          } as Record<string, unknown>,
         }
+      })
+      const dvIdByPoId = Object.fromEntries(ops.map(op => [op.id, op.dvId]))
+
+      const batchResult = await executeOperationSetWithRetry(
+        projectId,
+        ops.map(op => ({ id: op.id, entity: op.entity })),
+        `Project Online assignment import ${new Date().toISOString()}`,
+      )
+
+      for (const op of batchResult.succeeded) {
+        const result: AssignmentWriteResult = {
+          poAssignmentId: op.id,
+          dvAssignmentId: dvIdByPoId[op.id],
+          success: true,
+        }
+        results.push(result)
+        onProgress?.(result)
       }
 
-      if (queued > 0) {
-        try {
-          await executeOperationSet(operationSetId)
-          for (const result of queuedResults) {
-            results.push(result)
-            onProgress?.(result)
-          }
-        } catch (e) {
-          const errorClass = classifyDataverseError(e)
-          for (const result of queuedResults) {
-            const failed = {
-              poAssignmentId: result.poAssignmentId,
-              success: false,
-              error: nowError('Assignment', result.poAssignmentId, String(e), errorClass !== 'Other' ? errorClass : undefined, poProjectId),
-            }
-            results.push(failed)
-            onProgress?.(failed)
-          }
+      for (const { op, reason, errorClass } of batchResult.failed) {
+        const result: AssignmentWriteResult = {
+          poAssignmentId: op.id,
+          dvAssignmentId: errorClass === 'AlreadyExists' ? dvIdByPoId[op.id] : undefined,
+          success: false,
+          error: nowError('Assignment', op.id, reason, errorClass !== 'Other' ? errorClass : undefined, poProjectId),
         }
+        results.push(result)
+        onProgress?.(result)
       }
     }
   }
@@ -186,8 +223,21 @@ export async function writeAssignments(
   return results
 }
 
-function getResourceUid(row: { ResourceUID?: string; ResourceId?: string }): string {
-  return row.ResourceUID ?? row.ResourceId ?? ''
+function getResourceKeys(row: { ResourceUID?: string; ResourceId?: string }): string[] {
+  return [...new Set([row.ResourceUID, row.ResourceId].map(value => value?.trim()).filter((value): value is string => !!value))]
+}
+
+function resolveMappedId(map: Record<string, string>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = map[key]
+    if (value) return value
+  }
+  return undefined
+}
+
+function assignmentKey(taskId: unknown, teamMemberId: unknown): string | undefined {
+  if (!taskId || !teamMemberId) return undefined
+  return `${String(taskId).toLowerCase()}:${String(teamMemberId).toLowerCase()}`
 }
 
 function groupAssignmentsByProject(assignments: PoAssignment[]): Map<string, PoAssignment[]> {
@@ -199,4 +249,3 @@ function groupAssignmentsByProject(assignments: PoAssignment[]): Map<string, PoA
   }
   return grouped
 }
-

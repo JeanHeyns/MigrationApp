@@ -25,6 +25,7 @@ export interface FieldMapping {
   customField: PoCustomField
   targetColumnType: DataverseColumnType
   targetLogicalName: string
+  targetDisplayName?: string
   lookupTable?: PoLookupTable
   skip: boolean
   migrateValue: boolean       // write the PO value to Dataverse when importing

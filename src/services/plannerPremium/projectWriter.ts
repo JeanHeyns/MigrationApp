@@ -9,7 +9,7 @@ import { effectiveSettings } from '../../utils/effectiveProjectSettings'
 import { listRecords, performUnboundAction, patchRecord, associateNNRecord, disassociateNNRecord, listAssociatedNNRecords } from './dataverseClient'
 import { cleanGuid, escapeODataString, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
 import { classifyDataverseError } from './errorClassifier'
-import { applyResolvers } from './recordResolverApplier'
+import { applyResolvers, getMappedSourceValue } from './recordResolverApplier'
 import { buildFullModeResolverMap } from './resolverFactory'
 
 // Toggle in DevTools: localStorage.setItem('DEBUG_DATAONLY_WRITER', '1')
@@ -357,12 +357,13 @@ function buildProjectFieldDiagnostics(
 ): ProjectFieldWriteDiagnostic[] {
   return mappings.map(mapping => {
     const sourceKey = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
-    const sourceValue = getProjectSourceValue(project, mapping)
+    const source = getMappedSourceValue(project as Record<string, unknown>, mapping.customField)
+    const sourceValue = source.value
     const skipped = skippedFields.find(sf => sf.poField === sourceKey || sf.poField === mapping.customField.CustomFieldName)
     const targetLogicalName = mapping.targetLogicalName
     return {
       poField: mapping.customField.CustomFieldName,
-      sourceKey,
+      sourceKey: source.key ?? sourceKey,
       targetLogicalName,
       targetColumnType: mapping.targetColumnType,
       sourceValue,
@@ -374,12 +375,6 @@ function buildProjectFieldDiagnostics(
       ...(skipped ? { skipReason: skipped.reason } : {}),
     }
   })
-}
-
-function getProjectSourceValue(project: PoProject, mapping: FieldMapping): unknown {
-  const fieldName = mapping.customField.ODataFieldName
-  if (fieldName && project[fieldName] !== undefined) return project[fieldName]
-  return project[mapping.customField.CustomFieldName]
 }
 
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

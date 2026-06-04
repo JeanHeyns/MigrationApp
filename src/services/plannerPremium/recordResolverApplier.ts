@@ -30,6 +30,59 @@ export interface AppliedRecord {
   pendingAssociations: PendingAssociation[]
 }
 
+export interface SourceValueResult {
+  key?: string
+  value: unknown
+}
+
+export function getMappedSourceValue(
+  poRecord: Record<string, unknown>,
+  customField: FieldMapping['customField'],
+): SourceValueResult {
+  const exactKeys = [
+    customField.ODataFieldName,
+    customField.CustomFieldName,
+    customField.CustomFieldName?.replace(/[^a-zA-Z0-9]/g, ''),
+    customField.CustomFieldName?.replace(/\s+/g, ''),
+  ].filter((key, index, keys): key is string =>
+    typeof key === 'string' && key.length > 0 && keys.indexOf(key) === index
+  )
+
+  const candidateKeys: string[] = []
+  const addCandidateKey = (key: string) => {
+    if (!candidateKeys.includes(key)) candidateKeys.push(key)
+  }
+  for (const key of exactKeys) {
+    if (poRecord[key] !== undefined) addCandidateKey(key)
+  }
+  const normalizedCandidates = new Set(exactKeys.map(normalizeSourceKey))
+  for (const key of Object.keys(poRecord)) {
+    if (normalizedCandidates.has(normalizeSourceKey(key))) {
+      addCandidateKey(key)
+    }
+  }
+
+  let firstDefined: SourceValueResult | undefined
+  for (const key of candidateKeys) {
+    const value = poRecord[key]
+    if (!firstDefined) firstDefined = { key, value }
+    if (isMeaningfulSourceValue(value)) return { key, value }
+  }
+
+  return firstDefined ?? { value: undefined }
+}
+
+function isMeaningfulSourceValue(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== ''
+}
+
+function normalizeSourceKey(key: string): string {
+  return key
+    .replace(/_x[0-9a-fA-F]{4}_/g, '')
+    .replace(/[^a-zA-Z0-9]/g, '')
+    .toLowerCase()
+}
+
 // ─── Main function ────────────────────────────────────────────────────────────
 
 /**
@@ -58,9 +111,7 @@ export function applyResolvers(
     if (!fieldKey) continue
 
     const dvField = mapping.targetLogicalName
-    const poValue = poRecord[fieldKey] !== undefined
-      ? poRecord[fieldKey]
-      : (mapping.customField.ODataFieldName ? poRecord[mapping.customField.CustomFieldName] : undefined)
+    const poValue = getMappedSourceValue(poRecord, mapping.customField).value
     const resolver = resolvers.get(fieldKey)
 
     if (!resolver) {
@@ -123,15 +174,9 @@ export function applyResolvers(
     if (!resolver) continue
 
     const fieldMapping = fieldMappingByKey.get(mlMapping.poFieldName)
-    const odataFieldName = fieldMapping?.customField.ODataFieldName
-    const customFieldName = fieldMapping?.customField.CustomFieldName
-    const poValue = poRecord[mlMapping.poFieldName] !== undefined
-      ? poRecord[mlMapping.poFieldName]
-      : odataFieldName && poRecord[odataFieldName] !== undefined
-        ? poRecord[odataFieldName]
-        : customFieldName
-          ? poRecord[customFieldName]
-          : undefined
+    const poValue = fieldMapping
+      ? getMappedSourceValue(poRecord, fieldMapping.customField).value
+      : poRecord[mlMapping.poFieldName]
     const result = resolver.resolve(poValue)
     if (result.status === 'empty') continue
 

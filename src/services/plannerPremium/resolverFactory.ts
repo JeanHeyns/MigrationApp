@@ -337,6 +337,12 @@ function buildDirectResolver(entry: ResolverEntry): FieldResolver {
     fieldType: entry.dvType,
     resolve: (poValue) => {
       if (poValue == null || poValue === '') return { status: 'empty' }
+      if (entry.dvType === 'Boolean') {
+        const value = toBoolean(poValue)
+        return value === undefined
+          ? { status: 'unresolved', originalLabel: String(poValue) }
+          : { status: 'resolved', value }
+      }
       if (entry.dvType === 'Decimal' || entry.dvType === 'Money') {
         const value = toNumber(poValue)
         return value == null
@@ -505,8 +511,10 @@ function buildChoiceValueMap(
     }
 
     valueMap.set(normalize(source.id), matched)
+    valueMap.set(normalizeGuid(source.id), matched)
     for (const label of source.labels) {
       valueMap.set(normalize(label), matched)
+      valueMap.set(normalizeGuid(label), matched)
     }
   }
 
@@ -547,7 +555,7 @@ async function buildChoiceResolver(
       if (poValue == null || poValue === '') return { status: 'empty' }
       const label = String(poValue)
       const key = normalize(label)
-      const value = map.get(key)
+      const value = map.get(key) ?? map.get(normalizeGuid(label))
       if (isDebug()) console.info('[dataOnly] choice resolve', {
         field: entry.poFieldName,
         dvLogicalName: entry.dvLogicalName,
@@ -585,7 +593,7 @@ async function buildMultiChoiceResolver(
 
       for (const label of labels) {
         const key = normalize(label)
-        const v = map.get(key)
+        const v = map.get(key) ?? map.get(normalizeGuid(label))
         if (isDebug()) console.info('[dataOnly] multi choice resolve item', {
           field: entry.poFieldName,
           dvLogicalName: entry.dvLogicalName,
@@ -698,6 +706,14 @@ async function buildLookupResolver(entry: ResolverEntry, warnings: ResolverBuild
     nameMap.set(name, String(rec[idField] ?? '').replace(/[{}]/g, ''))
   }
 
+  const sourceLabelMap = new Map<string, string[]>()
+  for (const source of entry.sourceOptions ?? []) {
+    const labels = source.labels.filter(Boolean)
+    if (labels.length === 0) continue
+    sourceLabelMap.set(normalize(source.id), labels)
+    sourceLabelMap.set(normalizeGuid(source.id), labels)
+  }
+
   if (duplicates.size > 0) {
     warnings.push({
       severity: 'warn',
@@ -713,7 +729,13 @@ async function buildLookupResolver(entry: ResolverEntry, warnings: ResolverBuild
     resolve: (poValue) => {
       if (poValue == null || poValue === '') return { status: 'empty' }
       const label = String(poValue)
-      const guid = nameMap.get(normalize(label))
+      const sourceLabels = [
+        ...(sourceLabelMap.get(normalize(label)) ?? []),
+        ...(sourceLabelMap.get(normalizeGuid(label)) ?? []),
+      ]
+      const guid = [label, ...sourceLabels]
+        .map(candidate => nameMap.get(normalize(candidate)))
+        .find((value): value is string => !!value)
       if (!guid) return { status: 'unresolved', originalLabel: label }
       return {
         status: 'resolved',
@@ -941,4 +963,17 @@ function toNumber(value: unknown): number | undefined {
 
   const parsed = Number(text)
   return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function toBoolean(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') {
+    if (value === 1) return true
+    if (value === 0) return false
+    return undefined
+  }
+  const text = String(value).trim().toLowerCase()
+  if (['true', 'yes', 'y', 'ja', '1'].includes(text)) return true
+  if (['false', 'no', 'n', 'nee', '0'].includes(text)) return false
+  return undefined
 }

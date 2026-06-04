@@ -56,10 +56,11 @@ function buildAttributeBody(
   fm: FieldMapping,
   optionSetMappings: OptionSetMapping[],
 ): Record<string, unknown> {
+  const displayName = fm.targetDisplayName?.trim() || fm.customField.CustomFieldName
   const base = {
     SchemaName: fm.targetLogicalName,
     LogicalName: fm.targetLogicalName,
-    DisplayName: dvLabel(fm.customField.CustomFieldName),
+    DisplayName: dvLabel(displayName),
     Description: dvLabel(`Migrated from Project Online: ${fm.customField.CustomFieldName}`),
     RequiredLevel: requiredLevel(),
     IsValidForAdvancedFind: managedBoolean(true),
@@ -254,7 +255,7 @@ export async function createColumns(
           referencedEntity: fm.relatedEntity.logicalName,
           referencingEntity: entityLogicalName,
           lookupSchemaName: fm.targetLogicalName,
-          lookupDisplayName: fm.customField.CustomFieldName,
+          lookupDisplayName: fm.targetDisplayName?.trim() || fm.customField.CustomFieldName,
           relationshipSchemaName,
           solutionUniqueName,
         })

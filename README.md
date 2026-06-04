@@ -79,6 +79,7 @@ The template path supports project metadata, tasks, resources, assignments, depe
 ## Managed Solution Download
 
 The Power Platform app is packaged as the managed solution `MigrationToolApp`.
+Inside Power Apps, the code app is named `Project Online Migratietool`.
 
 Latest exported solution:
 
@@ -100,7 +101,8 @@ Environment variable details:
 
 ```text
 Display name: Dataverse Organization URL
-Logical name: exp_dataverseorgurl
+Logical name: ppm_dataverseorgurl
+Legacy logical name also supported: exp_dataverseorgurl
 ```
 
 After importing the managed solution into a Power Platform environment, set the environment variable value to that environment's Dataverse organization URL, for example:
@@ -157,10 +159,10 @@ Remote:
 https://github.com/JeanHeyns/MigrationApp.git
 ```
 
-Main branch:
+Current development branch:
 
 ```text
-main
+dev-nieuwe-features
 ```
 
 Typical push flow:
@@ -168,8 +170,8 @@ Typical push flow:
 ```powershell
 git status --short --branch
 npm.cmd run build
-git fetch origin main
+git fetch origin dev-nieuwe-features
 git add -A
 git commit -m "Update migration app documentation"
-git push origin main
+git push origin dev-nieuwe-features
 ```

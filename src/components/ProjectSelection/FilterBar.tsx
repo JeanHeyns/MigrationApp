@@ -95,6 +95,16 @@ export function FilterBar({ ownerNames, tasksAvailable }: FilterBarProps) {
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
   }, [])
 
+  useEffect(() => {
+    if (tasksAvailable) return
+    if (projectFilter.taskCountMin === null && projectFilter.taskCountMax === null) return
+    setProjectFilter({
+      ...projectFilter,
+      taskCountMin: null,
+      taskCountMax: null,
+    })
+  }, [tasksAvailable, projectFilter, setProjectFilter])
+
   function toggleOwner(name: string) {
     const current = projectFilter.ownerNames
     const next = current.includes(name)

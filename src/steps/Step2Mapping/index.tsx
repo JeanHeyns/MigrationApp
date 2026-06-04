@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Button,
   Checkbox,
+  Input,
   MessageBar,
   MessageBarBody,
   Select,
@@ -119,11 +120,15 @@ const PO_ENTITY_TO_DV: Record<string, string> = {
 
 const PO_TO_SCHEMA_TYPES: Record<string, ColumnMetaType[]> = {
   Text:        ['String', 'Memo'],
+  Memo:        ['Memo', 'String'],
   Number:      ['Integer', 'Decimal', 'Money'],
   Cost:        ['Money', 'Decimal'],
   Duration:    ['Integer', 'Decimal'],
   Date:        ['DateTime'],
   Flag:        ['Boolean'],
+  Boolean:     ['Boolean'],
+  Choice:      ['Picklist'],
+  MultiChoice: ['MultiSelectPicklist'],
   Lookup:      ['Picklist', 'Lookup'],
   LookupMulti: ['MultiSelectPicklist'],
 }
@@ -141,6 +146,8 @@ const SCHEMA_TYPE_TO_DV_TYPE: Partial<Record<ColumnMetaType, DataverseColumnType
   Lookup:               'Lookup',
 }
 
+type FieldFilter = 'all' | 'active' | 'skipped' | 'project' | 'task' | 'resource'
+
 // ─── dataOnly helpers ─────────────────────────────────────────────────────────
 
 function getCompatibleColumns(dvEntity: EntitySchema, poType: string): ColumnMeta[] {
@@ -149,6 +156,10 @@ function getCompatibleColumns(dvEntity: EntitySchema, poType: string): ColumnMet
 }
 
 function autoMatchColumn(cf: PoCustomField, compatible: ColumnMeta[], prefix: string): ColumnMeta | null {
+  if (cf.DataverseLogicalName) {
+    const explicit = compatible.find(c => c.logicalName === cf.DataverseLogicalName)
+    if (explicit) return explicit
+  }
   const logicalName = toLogicalName(cf.CustomFieldName, prefix)
   const byLogical = compatible.find(c => c.logicalName === logicalName)
   if (byLogical) return byLogical
@@ -252,6 +263,7 @@ function buildResolverPlanFromMappings(
     const targetEntity = col.targets?.[0]
     const targetEntityObj = targetEntity ? snapshot.entities[targetEntity] : undefined
     const isChoice = col.type === 'Picklist' || col.type === 'MultiSelectPicklist'
+    const usesLookupTableSource = isChoice || col.type === 'Lookup'
     fields.push({
       poFieldName:      m.customField.ODataFieldName ?? m.customField.CustomFieldName,
       dvLogicalName:    m.targetLogicalName,
@@ -262,7 +274,7 @@ function buildResolverPlanFromMappings(
       isGlobalOptionSet: isChoice ? col.isGlobalOptionSet : undefined,
       optionSetOptions: isChoice ? col.optionSetOptions : undefined,
       inlineOptions:    isChoice ? col.inlineOptions : undefined,
-      sourceOptions:    isChoice ? sourceOptionsForMapping(m, lookupTableMap) : undefined,
+      sourceOptions:    usesLookupTableSource ? sourceOptionsForMapping(m, lookupTableMap) : undefined,
       targetEntity,
       targetEntitySet:  targetEntityObj?.entitySetName,
       primaryNameField: targetEntityObj?.primaryNameField,
@@ -291,10 +303,12 @@ function buildDataOnlyMultiLookupMappings(data: PoFetchedData, snapshot: SchemaS
       const poFieldName = cf.ODataFieldName || cf.CustomFieldName
       const expectedLogicalName = toLogicalName(cf.CustomFieldName, prefix)
 
-      // Check for MultiChoice column (MultiSelectPicklist with expected name)
-      const mcColumn = projectEntity?.attributes.find(
-        a => a.logicalName === expectedLogicalName && a.type === 'MultiSelectPicklist',
-      )
+      // Check for MultiChoice column. If Step 2 can match a MultiSelectPicklist
+      // column, the existing column schema is authoritative and MultiChoice wins.
+      const mcColumn = projectEntity
+        ? autoMatchColumn(cf, getCompatibleColumns(projectEntity, 'LookupMulti'), prefix)
+          ?? projectEntity.attributes.find(a => a.logicalName === expectedLogicalName && a.type === 'MultiSelectPicklist')
+        : undefined
 
       // Check for N:N relationship targeting the expected lookup entity
       let nnRel: NNRelationshipMeta | undefined
@@ -306,7 +320,14 @@ function buildDataOnlyMultiLookupMappings(data: PoFetchedData, snapshot: SchemaS
         }
       }
 
-      // N:N takes priority (spec A.10.2)
+      if (mcColumn) {
+        return {
+          poFieldName,
+          targetShape: 'MultiChoice' as MultiLookupTargetShape,
+          targetColumnLogicalName: mcColumn.logicalName,
+        }
+      }
+
       if (nnRel) {
         const navProp = nnRel.entity1LogicalName === 'msdyn_project'
           ? nnRel.entity2NavigationPropertyName
@@ -322,13 +343,6 @@ function buildDataOnlyMultiLookupMappings(data: PoFetchedData, snapshot: SchemaS
           relationshipType: 'pure-nn' as const,
         }
       }
-      if (mcColumn) {
-        return {
-          poFieldName,
-          targetShape: 'MultiChoice' as MultiLookupTargetShape,
-          targetColumnLogicalName: mcColumn.logicalName,
-        }
-      }
       // Neither found — default to N:N (user can configure; error shown in bottom panel)
       return {
         poFieldName,
@@ -341,12 +355,17 @@ function activeMultiLookupMappings(
   fieldMappings: FieldMapping[],
   multiLookupMappings: MultiLookupMapping[],
 ): MultiLookupMapping[] {
-  const activeLookupMultiFields = new Set(
-    fieldMappings
-      .filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti')
-      .map(m => m.customField.ODataFieldName || m.customField.CustomFieldName),
-  )
-  return multiLookupMappings.filter(ml => activeLookupMultiFields.has(ml.poFieldName))
+  return fieldMappings
+    .filter(m => !m.skip && m.customField.CustomFieldType === 'LookupMulti')
+    .map(m => {
+      const poFieldName = m.customField.ODataFieldName || m.customField.CustomFieldName
+      return multiLookupMappings.find(ml => ml.poFieldName === poFieldName)
+        ?? {
+          poFieldName,
+          targetShape: 'MultiChoice' as MultiLookupTargetShape,
+          targetColumnLogicalName: m.useExistingField ? m.targetLogicalName : undefined,
+        }
+    })
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -473,6 +492,7 @@ export function Step2Mapping() {
   const [multiLookupMappingsState, setMultiLookupMappingsState] = useState<MultiLookupMapping[]>([])
   // Cache of fetched attributes per lookup entity logical name
   const [mlEntityAttrs, setMlEntityAttrs] = useState<Record<string, DvEntityAttribute[]>>({})
+  const [fieldFilter, setFieldFilter] = useState<FieldFilter>('all')
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
@@ -580,9 +600,13 @@ export function Step2Mapping() {
   function setFieldSkip(idx: number, skip: boolean) {
     const mapping = fieldMappings[idx]
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, skip } : m))
-    if (skip && mapping?.customField.CustomFieldType === 'LookupMulti') {
+    if (mapping?.customField.CustomFieldType === 'LookupMulti') {
       const poFieldName = mapping.customField.ODataFieldName || mapping.customField.CustomFieldName
-      setMultiLookupMappingsState(prev => prev.filter(ml => ml.poFieldName !== poFieldName))
+      setMultiLookupMappingsState(prev => {
+        if (skip) return prev.filter(ml => ml.poFieldName !== poFieldName)
+        if (prev.some(ml => ml.poFieldName === poFieldName)) return prev
+        return [...prev, defaultMultiLookupMapping(mapping)]
+      })
     }
   }
 
@@ -624,6 +648,46 @@ export function Step2Mapping() {
 
   function setFieldMigrateValue(idx: number, migrateValue: boolean) {
     setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, migrateValue } : m))
+  }
+
+  function setFieldCreateName(idx: number, displayName: string) {
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      return {
+        ...m,
+        targetDisplayName: displayName,
+        targetLogicalName: toLogicalName(displayName || m.customField.CustomFieldName, prefix),
+      }
+    }))
+  }
+
+  function defaultMultiLookupMapping(mapping: FieldMapping): MultiLookupMapping {
+    return {
+      poFieldName: mapping.customField.ODataFieldName || mapping.customField.CustomFieldName,
+      targetShape: 'MultiChoice',
+      targetColumnLogicalName: mapping.useExistingField ? mapping.targetLogicalName : undefined,
+    }
+  }
+
+  function setFieldsSkip(indexes: number[], skip: boolean) {
+    const lookupMultiMappings = indexes
+      .map(idx => fieldMappings[idx])
+      .filter((m): m is FieldMapping => !!m && m.customField.CustomFieldType === 'LookupMulti')
+    setFieldMappings(prev => prev.map((m, i) => indexes.includes(i) ? { ...m, skip } : m))
+    if (lookupMultiMappings.length > 0) {
+      const lookupMultiNames = new Set(lookupMultiMappings.map(m => m.customField.ODataFieldName || m.customField.CustomFieldName))
+      setMultiLookupMappingsState(prev => {
+        if (skip) return prev.filter(ml => !lookupMultiNames.has(ml.poFieldName))
+        const next = [...prev]
+        for (const mapping of lookupMultiMappings) {
+          const defaultMapping = defaultMultiLookupMapping(mapping)
+          if (!next.some(ml => ml.poFieldName === defaultMapping.poFieldName)) {
+            next.push(defaultMapping)
+          }
+        }
+        return next
+      })
+    }
   }
 
   function setFieldExistingMapping(idx: number, logicalName: string, attrType: string) {
@@ -839,6 +903,23 @@ export function Step2Mapping() {
 
   const activeFields = fieldMappings.filter(m => !m.skip)
   const migratingFields = fieldMappings.filter(m => !m.skip && m.migrateValue)
+  const displayedFieldEntries = fieldMappings
+    .map((mapping, idx) => ({ mapping, idx }))
+    .filter(({ mapping }) => {
+      switch (fieldFilter) {
+        case 'active': return !mapping.skip
+        case 'skipped': return mapping.skip
+        case 'project': return mapping.customField.CustomFieldEntityType === 'Project'
+        case 'task': return mapping.customField.CustomFieldEntityType === 'Task'
+        case 'resource': return mapping.customField.CustomFieldEntityType === 'Resource'
+        default: return true
+      }
+    })
+  const displayedFieldIndexes = displayedFieldEntries.map(e => e.idx)
+  const displayedFieldIndexSet = new Set(displayedFieldIndexes)
+  const hiddenFieldIndexes = fieldMappings
+    .map((_, idx) => idx)
+    .filter(idx => !displayedFieldIndexSet.has(idx))
   const solutionEntities = dvEntities.filter(e =>
     solutionEntityIds.has((e.metadataId ?? '').toLowerCase().replace(/[{}]/g, ''))
   )
@@ -910,16 +991,38 @@ export function Step2Mapping() {
         <Button size="small" onClick={handleRedetectTypes}>
           {migrationMode === 'dataOnly' ? 'Re-scan existing columns' : 'Re-detect column types'}
         </Button>
+        <Select size="small" value={fieldFilter} onChange={(_, d) => setFieldFilter(d.value as FieldFilter)}>
+          <option value="all">All fields</option>
+          <option value="active">Active only</option>
+          <option value="skipped">Skipped only</option>
+          <option value="project">Project fields</option>
+          <option value="task">Task fields</option>
+          <option value="resource">Resource fields</option>
+        </Select>
+        <Button size="small" disabled={hiddenFieldIndexes.length === 0} onClick={() => setFieldsSkip(hiddenFieldIndexes, true)}>
+          Keep shown
+        </Button>
+        <Button size="small" onClick={() => setFieldsSkip(displayedFieldIndexes, true)}>
+          Skip shown
+        </Button>
+        <Button size="small" onClick={() => setFieldsSkip(fieldMappings.map((_, idx) => idx), true)}>
+          Skip all
+        </Button>
+        <Button size="small" onClick={() => setFieldsSkip(displayedFieldIndexes, false)}>
+          Unskip shown
+        </Button>
         <Button size="small" onClick={handleSaveJson}>Save mapping as JSON</Button>
         <Button size="small" onClick={() => fileInputRef.current?.click()}>Load mapping from JSON</Button>
         <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleLoadJson} />
         {migrationMode === 'schemaOnly' ? (
           <span className={styles.summary}>
             {activeFields.length} field{activeFields.length !== 1 ? 's' : ''} will be created, {fieldMappings.length - activeFields.length} skipped
+            {fieldFilter !== 'all' ? ` · showing ${displayedFieldEntries.length} filtered` : ''}
           </span>
         ) : (
         <span className={styles.summary}>
           {activeFields.length} of {fieldMappings.length} fields active · {migratingFields.length} value(s) will migrate
+          {fieldFilter !== 'all' ? ` · showing ${displayedFieldEntries.length} filtered` : ''}
         </span>
         )}
       </div>
@@ -946,14 +1049,14 @@ export function Step2Mapping() {
             </tr>
           </thead>
           <tbody>
-            {fieldMappings.length === 0 && (
+            {displayedFieldEntries.length === 0 && (
               <tr>
                 <td className={styles.td} colSpan={6} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
-                  No custom fields found in Project Online.
+                  {fieldMappings.length === 0 ? 'No custom fields found in Project Online.' : 'No fields match the current filter.'}
                 </td>
               </tr>
             )}
-            {fieldMappings.map((m, idx) => {
+            {displayedFieldEntries.map(({ mapping: m, idx }) => {
               const isLookupMulti = m.customField.CustomFieldType === 'LookupMulti'
               const poFieldKey = m.customField.ODataFieldName || m.customField.CustomFieldName
               const mlMapping = isLookupMulti ? multiLookupMappingsState.find(x => x.poFieldName === poFieldKey) : undefined
@@ -1048,6 +1151,16 @@ export function Step2Mapping() {
                       ? <span style={{ fontSize: '12px', color: tokens.colorNeutralForeground3, fontStyle: 'italic' }}>↓ see N:N panel below</span>
                     : migrationMode === 'schemaOnly'
                       ? <>
+                          {m.customField.CustomFieldType !== 'LookupMulti' && (
+                            <Input
+                              size="small"
+                              className={styles.selectFixed}
+                              value={m.targetDisplayName ?? m.customField.CustomFieldName}
+                              onChange={e => setFieldCreateName(idx, e.target.value)}
+                              placeholder="Column display name"
+                              style={{ marginBottom: '6px' }}
+                            />
+                          )}
                           <Select
                             size="small"
                             className={styles.selectFixed}
@@ -1161,6 +1274,16 @@ export function Step2Mapping() {
                           </div>
                           {!m.useExistingField
                             ? <>
+                                {m.customField.CustomFieldType !== 'LookupMulti' && (
+                                  <Input
+                                    size="small"
+                                    className={styles.selectFixed}
+                                    value={m.targetDisplayName ?? m.customField.CustomFieldName}
+                                    onChange={e => setFieldCreateName(idx, e.target.value)}
+                                    placeholder="Column display name"
+                                    style={{ marginBottom: '6px' }}
+                                  />
+                                )}
                                 <Select
                                   size="small"
                                   className={styles.selectFixed}
@@ -1245,7 +1368,7 @@ export function Step2Mapping() {
         const nnFields = allLmFields.filter(m => {
           const poFN = m.customField.ODataFieldName || m.customField.CustomFieldName
           const ml = multiLookupMappingsState.find(x => x.poFieldName === poFN)
-          return !ml || ml.targetShape === 'N:N' || ml.targetShape === undefined
+          return ml?.targetShape === 'N:N'
         })
         if (nnFields.length === 0 && allLmFields.length === 0) return null
         const projectEntity = schemaSnapshot?.entities['msdyn_project']

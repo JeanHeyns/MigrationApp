@@ -23,7 +23,11 @@ import { useMigration, isFilterActive } from '../../app/MigrationContext'
 import { BulkActions } from '../../components/ProjectSelection/BulkActions'
 import { FilterBar } from '../../components/ProjectSelection/FilterBar'
 import { applyFilter } from '../../utils/projectFilter'
+import { fetchTasksForProjects } from '../../services/projectOnline/tasks'
+import { fetchDependencies } from '../../services/projectOnline/dependencies'
+import { fetchAssignmentsForProjects, fetchTeamMembersForProjects } from '../../services/projectOnline/assignments'
 import { writeResources } from '../../services/plannerPremium/resourceWriter'
+import type { ResourceImportMode, ResourceImportOption } from '../../services/plannerPremium/resourceWriter'
 import { writeProjects } from '../../services/plannerPremium/projectWriter'
 import type { ProjectWriteResult } from '../../services/plannerPremium/projectWriter'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
@@ -37,7 +41,7 @@ import type { AssignmentWriteResult } from '../../services/plannerPremium/assign
 import { buildResolverMap, buildMultiLookupResolverDataOnly, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
 import type { FieldResolver, ResolverBuildWarning } from '../../services/plannerPremium/resolverFactory'
 import type { ImportError, ImportResult } from '../../models/plannerPremium.types'
-import type { PoTask } from '../../models/projectOnline.types'
+import type { PoAssignment, PoProjectTeamMember, PoResource, PoTask } from '../../models/projectOnline.types'
 import type { SkippedFieldInstance } from '../../models/dataOnly.types'
 import type { ProjectOverride } from '../../types/projectDefaults'
 import { effectiveSettings } from '../../utils/effectiveProjectSettings'
@@ -102,14 +106,16 @@ const useStyles = makeStyles({
   },
 })
 
-type Phase = 'Ready' | 'Building resolvers' | 'Resources' | 'Importing' | 'Done' | 'Stopped' | 'Failed'
+type Phase = 'Ready' | 'Loading schedule data' | 'Building resolvers' | 'Resources' | 'Importing' | 'Done' | 'Stopped' | 'Failed'
 type SortCol = 'name' | 'start' | 'finish' | 'owner'
 type SortDir = 'asc' | 'desc'
+type ImportSection = 'resources' | 'projects' | 'import'
 
 export function Step4Import() {
   const styles = useStyles()
   const {
     fetchedData, mappingConfig, optionSetMappings, nextStep, prevStep,
+    dataSource, pwaUrl,
     addImportResult, clearImportResults,
     migrationMode, resolverPlan,
     addSkippedFieldInstances, clearSkippedFieldInstances,
@@ -128,6 +134,7 @@ export function Step4Import() {
   } = useMigration()
   const [systemUsers, setSystemUsers] = useState<DvSystemUser[]>([])
   const [projectOwnerMap, setProjectOwnerMap] = useState<Record<string, string>>({})
+  const [resourceOptions, setResourceOptions] = useState<Record<string, ResourceImportOption>>({})
 
   // ── Per-project override modal state ─────────────────────────────────────
   const [overrideModalId, setOverrideModalId] = useState<string | null>(null)
@@ -142,12 +149,15 @@ export function Step4Import() {
   const [completed, setCompleted] = useState(0)
   const [total, setTotal] = useState(0)
   const [fatalError, setFatalError] = useState<string | null>(null)
+  const [scheduleLoadMessage, setScheduleLoadMessage] = useState<string | null>(null)
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
   const [stopButtonPressed, setStopButtonPressed] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [sortCol, setSortCol] = useState<SortCol>('name')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [activeSection, setActiveSection] = useState<ImportSection>('resources')
   const logRef = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const stopRequestedRef = useRef(false)
 
   useBrowserCloseGuard(running)
@@ -179,6 +189,10 @@ export function Step4Import() {
     }, 1000)
     return () => clearInterval(interval)
   }, [running, importProgress])
+
+  useEffect(() => {
+    rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [activeSection])
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
@@ -303,7 +317,7 @@ export function Step4Import() {
   }
 
   function makeResult(entity: string, totalRows: number, errors: ImportError[]): ImportResult {
-    const realErrors = errors.filter(e => e.errorClass !== 'AlreadyExists')
+    const realErrors = errors.filter(e => e.errorClass !== 'AlreadyExists' && e.errorClass !== 'Skipped')
     const skipped = errors.length - realErrors.length
     return {
       entity,
@@ -330,6 +344,7 @@ export function Step4Import() {
   }
 
   async function runImport() {
+    setActiveSection('import')
     setRunning(true)
     setFatalError(null)
     setLogLines([])
@@ -345,17 +360,18 @@ export function Step4Import() {
     const isDataOnly = migrationMode === 'dataOnly'
     const concurrency = getConcurrencyLimit()
 
-    let totalOps = data.resources.length + selectedProjects.length + selectedTeamMembers.length
-    if (migrationScope.tasks) totalOps += selectedTasks.length
-    if (migrationScope.dependencies) totalOps += selectedDependencies.length
-    if (migrationScope.assignments) totalOps += selectedAssignments.length
-    setTotal(totalOps)
+    setTotal(data.resources.length + selectedProjects.length)
     setCompleted(0)
+    setScheduleLoadMessage(null)
 
     startImport(selectedProjects.length, concurrency)
     appendLog(`Starting import — ${selectedProjects.length} projects, concurrency=${concurrency}`)
 
     let resolvers: Map<string, FieldResolver> | undefined
+    let importTasks = selectedTasks
+    let importDependencies = selectedDependencies
+    let importAssignments = selectedAssignments
+    let importTeamMembers = selectedTeamMembers
 
     if (isDataOnly) {
       if (!resolverPlan) {
@@ -408,10 +424,42 @@ export function Step4Import() {
     }
 
     try {
+      if (dataSource === 'ProjectOnline' && migrationScope.tasks) {
+        setPhase('Loading schedule data')
+        appendLog(`Loading schedule data for ${selectedProjects.length} selected project(s)`)
+        const siteUrl = data.pwaUrl || pwaUrl
+        const [tasks, dependencies, assignments, teamMembers] = await Promise.all([
+          fetchTasksForProjects(siteUrl, selectedProjects),
+          migrationScope.dependencies ? fetchDependencies(siteUrl, selectedProjects) : Promise.resolve([]),
+          migrationScope.assignments ? fetchAssignmentsForProjects(siteUrl, selectedProjects) : Promise.resolve([]),
+          fetchTeamMembersForProjects(siteUrl, selectedProjects),
+        ])
+        importTasks = tasks
+        importDependencies = dependencies
+        importAssignments = assignments
+        importTeamMembers = teamMembers
+        setScheduleLoadMessage(`Loaded ${tasks.length} tasks, ${dependencies.length} dependencies, ${assignments.length} assignments, ${teamMembers.length} team members for the selected projects.`)
+        appendLog(`Loaded schedule data: ${tasks.length} tasks, ${dependencies.length} dependencies, ${assignments.length} assignments, ${teamMembers.length} team members`)
+      }
+
+      const effectiveTeamMembers = selectedProjects.flatMap(project =>
+        ensureAssignedResourcesInTeam(
+          importTeamMembers.filter(tm => tm.ProjectId === project.ProjectId),
+          importAssignments.filter(a => a.ProjectId === project.ProjectId),
+          data.resources,
+        )
+      )
+
+      let totalOps = data.resources.length + selectedProjects.length + effectiveTeamMembers.length
+      if (migrationScope.tasks) totalOps += importTasks.length
+      if (migrationScope.dependencies) totalOps += importDependencies.length
+      if (migrationScope.assignments) totalOps += importAssignments.length
+      setTotal(totalOps)
+
       // Phase 1: Resources (sequential, before parallel project loop)
       setPhase('Resources')
       appendLog(`Matching/importing ${data.resources.length} resources`)
-      const resourceResults = await writeResources(data.resources, r => {
+      const resourceResults = await writeResources(data.resources, buildEffectiveResourceOptions(data.resources, systemUsers, resourceOptions), r => {
         setCompleted(c => c + 1)
         appendLog(`${r.success ? 'OK' : 'SKIP'} resource ${r.poResourceUid}${r.error ? `: ${r.error.message}` : ''}`)
       })
@@ -419,6 +467,12 @@ export function Step4Import() {
         resourceResults.filter(r => r.success && r.dvBookableResourceId)
           .map(r => [r.poResourceUid, r.dvBookableResourceId as string])
       )
+      for (const resource of data.resources) {
+        const id = resourceIdMap[resource.ResourceUID ?? ''] ?? resourceIdMap[resource.ResourceId ?? '']
+        if (!id) continue
+        if (resource.ResourceUID) resourceIdMap[resource.ResourceUID] = id
+        if (resource.ResourceId) resourceIdMap[resource.ResourceId] = id
+      }
 
       // Phase 2: Per-project parallel (project + team members + tasks + deps + assignments)
       setPhase('Importing')
@@ -470,7 +524,8 @@ export function Step4Import() {
 
           const singleProjectMap = { [project.ProjectId]: dvProjectId }
 
-          const projectTeamMembers = selectedTeamMembers.filter(tm => tm.ProjectId === project.ProjectId)
+          const projectAssignments = importAssignments.filter(a => a.ProjectId === project.ProjectId)
+          const projectTeamMembers = effectiveTeamMembers.filter(tm => tm.ProjectId === project.ProjectId)
           const teamResults = await writeTeamMembers(projectTeamMembers, singleProjectMap, resourceIdMap, r => {
             setCompleted(c => c + 1)
             appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} team member ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
@@ -480,21 +535,29 @@ export function Step4Import() {
             teamResults.filter(r => r.success && r.dvAssignmentId)
               .map(r => [r.poAssignmentId, r.dvAssignmentId as string])
           )
+          for (const teamMember of projectTeamMembers) {
+            const keys = [teamMember.ResourceUID, teamMember.ResourceId].filter((value): value is string => !!value)
+            const id = keys.map(key => projectTeamMemberIdMap[`${teamMember.ProjectId}:${key}`]).find(Boolean)
+            if (!id) continue
+            for (const key of keys) {
+              projectTeamMemberIdMap[`${teamMember.ProjectId}:${key}`] = id
+            }
+          }
 
           if (migrationScope.tasks) {
-            const projectTasks = selectedTasks.filter(t => t.ProjectId === project.ProjectId)
+            const projectTasks = importTasks.filter(t => t.ProjectId === project.ProjectId)
             const taskResults = await writeTasks(projectTasks, singleProjectMap, config, optionSetMappings, r => {
               setCompleted(c => c + 1)
               appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} task ${r.poTaskId}${r.error ? `: ${r.error.message}` : ''}`)
             })
             allTaskResults.push(...taskResults)
             const projectTaskIdMap = Object.fromEntries(
-              taskResults.filter(r => r.success && r.dvTaskId)
+              taskResults.filter(r => r.dvTaskId)
                 .map(r => [r.poTaskId, r.dvTaskId as string])
             )
 
             if (migrationScope.dependencies) {
-              const projectDeps = selectedDependencies.filter(d => d.ProjectId === project.ProjectId)
+              const projectDeps = importDependencies.filter(d => d.ProjectId === project.ProjectId)
               if (projectDeps.length > 0) {
                 const depResults = await writeDependencies(projectDeps, singleProjectMap, projectTaskIdMap, r => {
                   setCompleted(c => c + 1)
@@ -505,7 +568,6 @@ export function Step4Import() {
             }
 
             if (migrationScope.assignments) {
-              const projectAssignments = selectedAssignments.filter(a => a.ProjectId === project.ProjectId)
               if (projectAssignments.length > 0) {
                 const assignResults = await writeAssignments(
                   projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, r => {
@@ -564,11 +626,38 @@ export function Step4Import() {
     }
   }
 
-  const progressPct = total > 0 ? completed / total : 0
+  const progressPct = total > 0 ? Math.min(1, completed / total) : 0
   const canProceed = phase === 'Done' || phase === 'Stopped'
+  const resourceRows = data.resources.map(resource => {
+    const sourceId = getResourceSourceId(resource)
+    const user = matchSystemUser(resource, systemUsers)
+    const option = resourceOptions[sourceId] ?? {}
+    const mode = option.mode ?? (user ? 'user' : 'account')
+    const name = option.nameOverride ?? resource.ResourceName
+    return { resource, sourceId, user, mode, name }
+  })
+  const invalidResourceOptions = resourceRows.some(row => row.mode !== 'skip' && !row.name.trim())
+
+  function updateResourceOption(sourceId: string, patch: ResourceImportOption) {
+    setResourceOptions(prev => ({ ...prev, [sourceId]: { ...prev[sourceId], ...patch } }))
+  }
+
+  function bulkSetResourceMode(mode: ResourceImportMode, rows = resourceRows) {
+    setResourceOptions(prev => {
+      const next = { ...prev }
+      for (const row of rows) {
+        next[row.sourceId] = { ...next[row.sourceId], mode }
+      }
+      return next
+    })
+  }
+
+  function resetResourceOptions() {
+    setResourceOptions({})
+  }
 
   return (
-    <div className={styles.root}>
+    <div ref={rootRef} className={styles.root}>
       <div>
         <div className={styles.title}>Step 4 — Import Data</div>
         <div className={styles.subtitle}>
@@ -596,9 +685,109 @@ export function Step4Import() {
         {migrationScope.resources ? ' · Resources ✓' : ' · Resources ✗'}
       </div>
 
+      <div className={styles.toolbar}>
+        <Button
+          appearance={activeSection === 'resources' ? 'primary' : 'secondary'}
+          disabled={running}
+          onClick={() => setActiveSection('resources')}
+        >
+          1. Resources
+        </Button>
+        <Button
+          appearance={activeSection === 'projects' ? 'primary' : 'secondary'}
+          disabled={running}
+          onClick={() => setActiveSection('projects')}
+        >
+          2. Projects
+        </Button>
+        <Button
+          appearance={activeSection === 'import' ? 'primary' : 'secondary'}
+          onClick={() => setActiveSection('import')}
+        >
+          3. Import
+        </Button>
+      </div>
+
+      {activeSection === 'resources' && (
+      <div className={styles.panel}>
+        <div className={styles.toolbar} style={{ justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ fontWeight: 600 }}>Resources</div>
+            <div className={styles.muted} style={{ fontSize: '12px' }}>
+              {resourceRows.filter(r => r.user).length} user match(es), {resourceRows.filter(r => !r.user).length} generic resource(s), {resourceRows.filter(r => r.mode === 'skip').length} skipped
+            </div>
+          </div>
+          <div className={styles.toolbar}>
+            <Button size="small" disabled={running} onClick={() => bulkSetResourceMode('skip')}>
+              Skip all
+            </Button>
+            <Button size="small" disabled={running} onClick={() => bulkSetResourceMode('skip', resourceRows.filter(r => !r.user))}>
+              Skip generic
+            </Button>
+            <Button size="small" disabled={running} onClick={resetResourceOptions}>
+              Reset
+            </Button>
+          </div>
+        </div>
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              <th className={styles.th} style={{ width: '70px' }}>Skip</th>
+              <th className={styles.th}>Source resource</th>
+              <th className={styles.th}>User match</th>
+              <th className={styles.th} style={{ width: '170px' }}>Create as</th>
+              <th className={styles.th}>Target name</th>
+            </tr>
+          </thead>
+          <tbody>
+            {resourceRows.map(row => (
+              <tr key={row.sourceId}>
+                <td className={styles.td}>
+                  <Checkbox
+                    checked={row.mode === 'skip'}
+                    disabled={running}
+                    onChange={(_, d) => updateResourceOption(row.sourceId, { mode: d.checked ? 'skip' : (row.user ? 'user' : 'account') })}
+                  />
+                </td>
+                <td className={styles.td}>
+                  <div>{row.resource.ResourceName}</div>
+                  <div className={styles.muted} style={{ fontSize: '12px' }}>{row.sourceId}</div>
+                </td>
+                <td className={styles.td}>
+                  {row.user ? row.user.fullname : <span className={styles.muted}>No user found</span>}
+                </td>
+                <td className={styles.td}>
+                  <Select
+                    size="small"
+                    disabled={running}
+                    value={row.mode}
+                    onChange={(_, d) => updateResourceOption(row.sourceId, { mode: d.value as ResourceImportMode })}
+                  >
+                    {row.user && <option value="user">User</option>}
+                    <option value="account">Account</option>
+                    <option value="skip">Skip</option>
+                  </Select>
+                </td>
+                <td className={styles.td}>
+                  <Input
+                    size="small"
+                    disabled={running || row.mode === 'skip'}
+                    value={row.name}
+                    onChange={e => updateResourceOption(row.sourceId, { nameOverride: e.target.value })}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      )}
+
+      {activeSection === 'projects' && (
+      <>
       <FilterBar
         ownerNames={ownerNames}
-        tasksAvailable={migrationScope.tasks}
+        tasksAvailable={dataSource === 'FileUpload' && migrationScope.tasks}
       />
 
       <BulkActions
@@ -609,8 +798,8 @@ export function Step4Import() {
       <span className={styles.muted} style={{ fontSize: '13px' }}>
         {selectedProjects.length} of {data.projects.length} projects selected
         {isFilterActive(projectFilter) ? ` · showing ${filteredProjects.length} filtered` : ''}
-        {migrationScope.tasks ? ` · ${selectedTasks.length} tasks` : ''}
-        {migrationScope.assignments ? ` · ${selectedAssignments.length} assignments` : ''}
+        {migrationScope.tasks ? (dataSource === 'FileUpload' ? ` · ${selectedTasks.length} tasks` : ' · tasks load at import') : ''}
+        {migrationScope.assignments ? (dataSource === 'FileUpload' ? ` · ${selectedAssignments.length} assignments` : ' · assignments load at import') : ''}
         {overrideCount > 0 ? ` · ${overrideCount} of ${data.projects.length} projects have overrides` : ''}
       </span>
 
@@ -667,7 +856,16 @@ export function Step4Import() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
 
+      {(activeSection === 'import' || running) && (
+      <>
+      {scheduleLoadMessage && (
+        <MessageBar intent="success">
+          <MessageBarBody>{scheduleLoadMessage}</MessageBarBody>
+        </MessageBar>
+      )}
       <div className={styles.panel}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div className={styles.toolbar}>
@@ -718,17 +916,31 @@ export function Step4Import() {
         label="I understand selected project schedules will be cleared and rebuilt"
         onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
       />
+      </>
+      )}
 
       <div className={styles.footer}>
         <Button onClick={prevStep} disabled={running}>Back</Button>
         <div className={styles.toolbar}>
-          <Button
-            appearance="primary"
-            onClick={runImport}
-            disabled={running || selectedProjects.length === 0 || !confirmScheduleRebuild}
-          >
-            {running ? 'Importing…' : 'Start Import'}
-          </Button>
+          {activeSection === 'resources' && (
+            <Button appearance="primary" disabled={running || invalidResourceOptions} onClick={() => setActiveSection('projects')}>
+              Next: Projects
+            </Button>
+          )}
+          {activeSection === 'projects' && (
+            <Button appearance="primary" disabled={running || selectedProjects.length === 0} onClick={() => setActiveSection('import')}>
+              Next: Import
+            </Button>
+          )}
+          {activeSection === 'import' && (
+            <Button
+              appearance="primary"
+              onClick={runImport}
+              disabled={running || selectedProjects.length === 0 || !confirmScheduleRebuild || invalidResourceOptions}
+            >
+              {running ? 'Importing…' : 'Start Import'}
+            </Button>
+          )}
           <Button onClick={nextStep} disabled={running || !canProceed}>
             Next: Validation Report
           </Button>
@@ -845,4 +1057,64 @@ function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
+}
+
+function getResourceSourceId(resource: PoResource): string {
+  return resource.ResourceUID ?? resource.ResourceId ?? resource.ResourceName
+}
+
+function matchSystemUser(resource: PoResource, users: DvSystemUser[]): DvSystemUser | undefined {
+  const email = resource.ResourceEmailAddress?.toLowerCase()
+  return users.find(user =>
+    (email && user.internalemailaddress?.toLowerCase() === email) ||
+    user.fullname?.toLowerCase() === resource.ResourceName.toLowerCase() ||
+    (resource.ResourceNTAccount && user.domainname?.toLowerCase() === resource.ResourceNTAccount.toLowerCase())
+  )
+}
+
+function buildEffectiveResourceOptions(
+  resources: PoResource[],
+  users: DvSystemUser[],
+  configured: Record<string, ResourceImportOption>,
+): Record<string, ResourceImportOption> {
+  return Object.fromEntries(resources.map(resource => {
+    const sourceId = getResourceSourceId(resource)
+    const user = matchSystemUser(resource, users)
+    const option = configured[sourceId] ?? {}
+    return [sourceId, {
+      mode: option.mode ?? (user ? 'user' : 'account'),
+      nameOverride: option.nameOverride?.trim() || resource.ResourceName,
+    }]
+  }))
+}
+
+function ensureAssignedResourcesInTeam(
+  teamMembers: PoProjectTeamMember[],
+  assignments: PoAssignment[],
+  resources: PoResource[],
+): PoProjectTeamMember[] {
+  const byKey = new Map<string, PoProjectTeamMember>()
+
+  for (const teamMember of teamMembers) {
+    const resourceKey = teamMember.ResourceUID || teamMember.ResourceId
+    if (!resourceKey) continue
+    byKey.set(`${teamMember.ProjectId}:${resourceKey}`, teamMember)
+  }
+
+  for (const assignment of assignments) {
+    const resourceKey = assignment.ResourceUID || assignment.ResourceId
+    if (!resourceKey) continue
+    const key = `${assignment.ProjectId}:${resourceKey}`
+    if (byKey.has(key)) continue
+
+    const resource = resources.find(r => r.ResourceUID === resourceKey || r.ResourceId === resourceKey)
+    byKey.set(key, {
+      ProjectId: assignment.ProjectId,
+      ResourceUID: assignment.ResourceUID || assignment.ResourceId || resourceKey,
+      ResourceId: assignment.ResourceId || assignment.ResourceUID || resourceKey,
+      ResourceName: resource?.ResourceName,
+    })
+  }
+
+  return [...byKey.values()]
 }

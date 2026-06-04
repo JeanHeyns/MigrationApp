@@ -47,10 +47,14 @@ export async function writeDependencies(
         const successorTaskId = taskIdMap[dependency.SuccessorTaskId]
 
         if (!predecessorTaskId || !successorTaskId) {
+          const missing = [
+            !predecessorTaskId ? `predecessor task ${dependency.PredecessorTaskId}` : null,
+            !successorTaskId ? `successor task ${dependency.SuccessorTaskId}` : null,
+          ].filter(Boolean).join(' and ')
           const result = {
             poDependencyId: dependency.DependencyId,
             success: false,
-            error: nowError('Dependency', dependency.DependencyId, 'Predecessor or successor task was not imported', 'PredecessorMissing', poProjectId),
+            error: nowError('Dependency', dependency.DependencyId, `Cannot create dependency: ${missing} was not imported or did not return a Dataverse task ID`, 'PredecessorMissing', poProjectId),
           }
           results.push(result)
           onProgress?.(result)

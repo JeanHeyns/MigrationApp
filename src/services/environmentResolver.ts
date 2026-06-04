@@ -4,7 +4,7 @@ import { normalizeDataverseOrgUrl } from '../config/environment'
 import {
   DATAVERSE_URL_LOCALSTORAGE_KEY,
   DATAVERSE_URL_VARIABLE_DISPLAY_NAME,
-  DATAVERSE_URL_VARIABLE_NAME,
+  DATAVERSE_URL_VARIABLE_NAMES,
 } from '../config/environmentVariableConfig'
 import type { DataverseUrlSource } from '../app/MigrationContext'
 
@@ -65,7 +65,7 @@ export async function resolveDataverseOrgUrl(): Promise<EnvironmentResolveResult
     }
   }
 
-  const variableValue = await fetchEnvironmentVariable(DATAVERSE_URL_VARIABLE_NAME)
+  const variableValue = await fetchFirstEnvironmentVariable(DATAVERSE_URL_VARIABLE_NAMES)
   if (variableValue?.trim()) {
     const url = await validateDataverseOrgUrl(variableValue)
     console.info(`Resolved Dataverse URL from environmentVariable: ${url}`)
@@ -73,7 +73,7 @@ export async function resolveDataverseOrgUrl(): Promise<EnvironmentResolveResult
   }
 
   throw new MissingDataverseUrlError(
-    `Dataverse URL not configured. Provide it manually or set the '${DATAVERSE_URL_VARIABLE_DISPLAY_NAME}' environment variable in the solution.`,
+    `Dataverse URL not configured. Provide it manually or set the '${DATAVERSE_URL_VARIABLE_DISPLAY_NAME}' environment variable in the solution (${DATAVERSE_URL_VARIABLE_NAMES.join(' or ')}).`,
   )
 }
 
@@ -143,6 +143,14 @@ async function fetchEnvironmentVariable(schemaName: string): Promise<string | nu
   const currentValue = extractEnvironmentVariableCurrentValue(definition)
   const defaultValue = definition.defaultvalue ?? definition.DefaultValue ?? null
   return currentValue?.trim() ? currentValue : defaultValue
+}
+
+async function fetchFirstEnvironmentVariable(schemaNames: string[]): Promise<string | null> {
+  for (const schemaName of schemaNames) {
+    const value = await fetchEnvironmentVariable(schemaName)
+    if (value?.trim()) return value
+  }
+  return null
 }
 
 async function getConnectorOrganizationUrl(): Promise<string> {

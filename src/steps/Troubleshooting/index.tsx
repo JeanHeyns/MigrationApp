@@ -196,6 +196,14 @@ export function Troubleshooting() {
         sourceValue: f.sourceValue,
         skipReason: f.skipReason,
       })),
+    fieldsMissingSourceValue: selectedProjectDiagnostic.mappedFields
+      .filter(f => f.migrateValue && !f.skipped && !f.hasSourceValue)
+      .map(f => ({
+        poField: f.poField,
+        expectedSourceKey: f.sourceKey,
+        targetLogicalName: f.targetLogicalName,
+        targetColumnType: f.targetColumnType,
+      })),
     skippedFields: selectedProjectDiagnostic.skippedFields,
   } : undefined
   const projectDiagnosticSummary = {
@@ -208,6 +216,10 @@ export function Troubleshooting() {
     patchFailed: projectWriteDiagnostics.filter(d => d.patchSucceeded === false).length,
     fieldsNotResolvedInPatch: projectWriteDiagnostics.reduce(
       (sum, d) => sum + d.mappedFields.filter(f => f.migrateValue && !f.skipped && f.hasSourceValue && !f.resolvedInPatch).length,
+      0,
+    ),
+    fieldsMissingSourceValue: projectWriteDiagnostics.reduce(
+      (sum, d) => sum + d.mappedFields.filter(f => f.migrateValue && !f.skipped && !f.hasSourceValue).length,
       0,
     ),
     skippedFieldValues: projectWriteDiagnostics.reduce((sum, d) => sum + d.skippedFields.length, 0),
