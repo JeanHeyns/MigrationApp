@@ -7,7 +7,9 @@ import {
   tokens,
 } from '@fluentui/react-components'
 import { useMigration } from '../../app/MigrationContext'
+import { LoaderFeedbackPanel } from '../../components/LoaderFeedbackPanel'
 import type { AssociationAttempt, ImportError } from '../../models/plannerPremium.types'
+import type { LoaderWarning } from '../../services/fileUpload/types'
 import type { SchemaCreationResults, SkippedFieldInstance } from '../../models/dataOnly.types'
 
 const useStyles = makeStyles({
@@ -180,6 +182,20 @@ function schemaRows(results: SchemaCreationResults): string[][] {
 
 function categoryTotal<T extends Record<string, unknown[]>>(category: T): number {
   return Object.values(category).reduce((sum, rows) => sum + rows.length, 0)
+}
+
+function buildWarningsCsvRows(warnings: LoaderWarning[]): string[][] {
+  return [
+    ['Sheet', 'Row', 'Column', 'Code', 'Message', 'Details'],
+    ...warnings.map(w => [
+      w.sheet,
+      w.row != null ? String(w.row) : '',
+      w.column ?? '',
+      w.code,
+      w.message,
+      w.details != null ? JSON.stringify(w.details) : '',
+    ]),
+  ]
 }
 
 // ─── Skipped fields grouping ──────────────────────────────────────────────────
@@ -449,6 +465,7 @@ export function Step5Report() {
     migrationMode, skippedFieldInstances, selectedSolution,
     schemaCreationResults, resetState, associationDiagnostics,
     selectedProjectIds, fetchedData, setSelectedProjectIds,
+    dataSource, fileUploadWarnings, fileUploadFileName,
   } = useMigration()
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
@@ -512,6 +529,18 @@ export function Step5Report() {
     const solutionName = selectedSolution?.uniquename ?? 'unknown'
     const date = new Date().toISOString().slice(0, 10)
     downloadCsv(`schema-creation-${solutionName}-${date}.csv`, schemaRows(schemaCreationResults))
+  }
+
+  function exportUploadWarnings() {
+    if (!fileUploadWarnings.length) return
+    const base = fileUploadFileName
+      ? fileUploadFileName.replace(/\.[^.]+$/, '')
+      : 'upload'
+    const stamp = new Date().toISOString()
+      .replace(/[-:]/g, '')
+      .replace('T', '-')
+      .slice(0, 13)
+    downloadCsv(`${base}-warnings-${stamp}.csv`, buildWarningsCsvRows(fileUploadWarnings))
   }
 
   function handleNextBatch() {
@@ -756,6 +785,26 @@ export function Step5Report() {
         )}
       </div>
       </>
+      )}
+
+      {/* File Upload Warnings — FileUpload source only */}
+      {dataSource === 'FileUpload' && fileUploadWarnings.length > 0 && (
+        <div className={styles.panel}>
+          <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
+            <div className={styles.sectionTitle}>
+              File Upload Warnings ({fileUploadWarnings.length})
+            </div>
+            <Button size="small" onClick={exportUploadWarnings}>
+              Export CSV ({fileUploadWarnings.length})
+            </Button>
+          </div>
+          <LoaderFeedbackPanel
+            mode="warnings"
+            warnings={fileUploadWarnings}
+            fileName={fileUploadFileName}
+            title=""
+          />
+        </div>
       )}
 
       {/* N:N Association Diagnostics — dataOnly mode only */}

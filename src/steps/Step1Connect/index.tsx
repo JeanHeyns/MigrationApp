@@ -25,6 +25,9 @@ import { fetchLookupTables } from '../../services/projectOnline/lookupTables'
 import { fetchSolutions } from '../../services/plannerPremium/dataverseClient'
 import { inspectSolution } from '../../services/plannerPremium/schemaInspector'
 import { parseWorkbook, generateTemplate } from '../../services/fileImportService'
+import { LoaderFeedbackPanel } from '../../components/LoaderFeedbackPanel'
+import { LoaderFileError } from '../../services/fileUpload/types'
+import type { LoaderError } from '../../services/fileUpload/types'
 import { listWorkHourTemplates, pickInitialTemplate, findTemplateByName } from '../../services/plannerPremium/workHourTemplates'
 import { fetchScheduleModeOptions, clearScheduleModeCache, findScheduleModeByLabel } from '../../services/plannerPremium/scheduleMode'
 import type { PoFetchedData } from '../../models/projectOnline.types'
@@ -294,6 +297,7 @@ export function Step1Connect() {
     scheduleModeOptions, setScheduleModeOptions,
     projectDefaults, setProjectDefaults,
     setProjectOverride, clearAllProjectOverrides,
+    fileUploadWarnings, fileUploadFileName, setFileUploadResult, clearFileUploadFeedback,
   } = useMigration()
 
   // ── Project Online state ─────────────────────────────────────────────────
@@ -308,7 +312,8 @@ export function Step1Connect() {
   const fileInputRef            = useRef<HTMLInputElement>(null)
   const [uploadedFile, setUploadedFile] = useState<File | null>(null)
   const [uploadResult, setUploadResult] = useState<PoFetchedData | null>(null)
-  const [uploadError, setUploadError]   = useState<string | null>(null)
+  const [uploadValidationError, setUploadValidationError] = useState<string | null>(null)
+  const [uploadErrors, setUploadErrors] = useState<LoaderError[] | null>(null)
   const [uploadParsing, setUploadParsing] = useState(false)
 
   // ── Shared: Dataverse solutions ──────────────────────────────────────────
@@ -428,25 +433,35 @@ export function Step1Connect() {
 
     if (dataSource === 'FileUpload') {
       if (!uploadedFile) {
-        setUploadError('Choose a file before loading.')
+        setUploadValidationError('Choose a file before loading.')
         return
       }
+      setUploadValidationError(null)
+      setUploadErrors(null)
+      clearFileUploadFeedback()
       setGlobalError(null)
-      setUploadError(null)
       setScanError(null)
       setModeNotice(null)
       setSchemaSnapshot(null)
       setResolverPlan(null)
+      setUploadResult(null)
+      setFetchedData(null)
       setUploadParsing(true)
       try {
         const parsed = await parseWorkbook(uploadedFile)
         setUploadResult(parsed.fetchedData)
         setFetchedData(parsed.fetchedData)
+        setFileUploadResult(parsed.warnings, uploadedFile.name)
         if (migrationMode === 'dataOnly') {
           await runScan()
         }
       } catch (err) {
-        setUploadError(String(err))
+        if (err instanceof LoaderFileError) {
+          setUploadErrors(err.errors)
+        } else {
+          setUploadErrors([{ code: 'CORRUPTED_FILE', message: String(err) }])
+        }
+        clearFileUploadFeedback()
       } finally {
         setUploadParsing(false)
       }
@@ -481,7 +496,9 @@ export function Step1Connect() {
     const file = e.target.files?.[0]
     if (!file) return
     setUploadedFile(file)
-    setUploadError(null)
+    setUploadValidationError(null)
+    setUploadErrors(null)
+    clearFileUploadFeedback()
     setUploadResult(null)
     setFetchedData(null)
     setModeNotice(null)
@@ -579,7 +596,8 @@ export function Step1Connect() {
     setResult(null)
     setUploadResult(null)
     setUploadedFile(null)
-    setUploadError(null)
+    setUploadErrors(null)
+    setUploadValidationError(null)
     setGlobalError(null)
     setModeNotice(null)
     setSchemaSnapshot(null)
@@ -868,11 +886,24 @@ export function Step1Connect() {
               Supported formats: .xlsx, .xls, .csv — use the template above for correct column structure.
             </div>
 
-            {uploadError && (
+            {uploadValidationError && (
               <MessageBar intent="error">
-                <MessageBarBody>Parse error: {uploadError}</MessageBarBody>
+                <MessageBarBody>{uploadValidationError}</MessageBarBody>
               </MessageBar>
             )}
+
+            <LoaderFeedbackPanel
+              mode="warnings"
+              warnings={fileUploadWarnings}
+              fileName={fileUploadFileName}
+            />
+
+            <LoaderFeedbackPanel
+              mode="errors"
+              errors={uploadErrors ?? undefined}
+              fileName={uploadedFile?.name}
+              onDownloadTemplate={handleDownloadTemplate}
+            />
           </div>
         )}
       </div>
@@ -1011,6 +1042,21 @@ export function Step1Connect() {
                 </Field>
               </div>
 
+              {projectDefaults.workHourTemplateId !== null && (
+                projectDefaults.hoursPerDay  !== DEFAULT_PROJECT_DEFAULTS.hoursPerDay  ||
+                projectDefaults.hoursPerWeek !== DEFAULT_PROJECT_DEFAULTS.hoursPerWeek ||
+                projectDefaults.daysPerMonth !== DEFAULT_PROJECT_DEFAULTS.daysPerMonth
+              ) && (
+                <MessageBar intent="info">
+                  <MessageBarBody>
+                    Work hour template and custom numeric values are both set.
+                    The template controls the project calendar (days/hours per week, holidays).
+                    HoursPerDay / HoursPerWeek / DaysPerMonth are effort-display factors used separately.
+                    Verify they are consistent with the chosen template.
+                  </MessageBarBody>
+                </MessageBar>
+              )}
+
               <div style={{ fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
                 These defaults apply to all projects unless overridden per project in Step 4.
               </div>
@@ -1138,6 +1184,15 @@ export function Step1Connect() {
                 Fetched {activeResult.customFields.length} custom field{activeResult.customFields.length !== 1 ? 's' : ''}, {activeResult.lookupTables.length} lookup table{activeResult.lookupTables.length !== 1 ? 's' : ''} ({lookupEntryCount} entr{lookupEntryCount !== 1 ? 'ies' : 'y'}).
               </MessageBarBody>
             </MessageBar>
+          )}
+
+          {dataSource === 'FileUpload' && uploadResult && !uploadErrors && (
+            <div style={{ fontSize: '13px', color: tokens.colorNeutralForeground3, marginBottom: '4px' }}>
+              ✓ {uploadedFile?.name ?? 'Uploaded file'}{' '}
+              loaded — {fileUploadWarnings.length > 0
+                ? `${fileUploadWarnings.length} warning(s) below`
+                : 'no warnings'}
+            </div>
           )}
 
           <div className={styles.previewGrid}>
