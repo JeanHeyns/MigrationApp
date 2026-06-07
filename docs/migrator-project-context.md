@@ -241,21 +241,23 @@ localStorage.setItem('CONCURRENCY_LIMIT', '1')  // set to 1 to serialize for deb
 
 ## Current pain points & opportunities
 
-Concrete candidates for future work, grounded in code observations (June 2026):
+Concrete candidates for future work, grounded in code observations (June 2026). Each bullet ends with a rough effort estimate.
 
-- **File upload warnings are silently discarded** — `parseWorkbook()` in `fileImportService.ts` returns `LoaderResult.warnings[]`, but `Step1Connect/index.tsx` only uses `.fetchedData` and throws the warnings away. The loader did all the work; the UX value is missing. `fileUploadWarnings` was never added to MigrationState. Straightforward wiring job (AC 28–32 from `file-upload-spec.md`). High user-facing impact.
+> **Already implemented, not pain points:** Working time config (Step 1 global UI + Step 4 per-project gear icon; `projectWriter.ts` applies overrides via `effectiveSettings()`; file-upload column path resolved in Step1Connect). Association diagnostics (`AssociationDiagnosticsPanel` in Step 5 with JSON export; fully rendered). Project write diagnostics (Troubleshooting step, accessible via header button). These are done.
 
-- **Hard-fail error panel shows raw string, not structured list** — when `parseWorkbook` throws a `LoaderFileError`, Step1Connect catches it with `setUploadError(String(err))`, which loses the typed `errors: LoaderError[]` array. User sees "LoaderFileError: This file is not a recognized migration template; Required column 'ProjectId'..." as one blob. Structured display is already designed in spec §7.2.
+- **File upload warnings silently discarded** — `parseWorkbook()` in `fileImportService.ts` returns `LoaderResult.warnings[]`, but `Step1Connect/index.tsx` calls only `setFetchedData(parsed.fetchedData)` and discards the warnings. `fileUploadWarnings` was never added to MigrationState; AC 28–32 of `file-upload-spec.md` remain unbuilt. Loader is production-ready; the UX value is missing. (small)
 
-- **`projectOnlineService.ts` is an orphan** — `src/services/projectOnlineService.ts` (connector-based PO operations using `shared_projectonline`) is not imported by any other file. It either predates the OData-direct approach or was scaffolded but never wired. Should be confirmed and deleted if unused, to avoid confusion.
+- **Hard-fail error panel shows raw string, not structured list** — `LoaderFileError` is caught with `setUploadError(String(err))`, which loses the typed `errors: LoaderError[]` array. User sees one concatenated string instead of a formatted error list. Structured display is already designed in `file-upload-spec.md` §7.2 and the types are in place. (trivial)
 
-- **No end-to-end smoke test for dependency scope toggle** — `dependencyWriter.ts` exists and the scope toggle wires to `migrationScope.dependencies`, but the dependency fetch in `projectOnline/dependencies.ts` uses `runWithConcurrency` defined locally (not the shared one in `concurrency.ts`). Worth verifying the two implementations stay in sync, and adding a smoke-test project with known dependencies.
+- **Import resume is feasible but unbuilt** — `projectWriter.ts:findExistingProject()` looks up by project name before creating; if found, it patches the existing record (`mode: 'existing'`). Projects are idempotent. Tasks/assignments/dependencies are **clear-and-recreate** (comment in `taskWriter.ts`: "Existing assignments, dependencies, and tasks are cleared before tasks are recreated"). Browser close = full restart (MigrationContext is in-memory only). A "resume" button that skips projects whose IDs appear in the completed set would need only in-session state tracking — no new persistence layer needed. (medium)
 
-- **Working time per-project override in Step 2** — the spec and MigrationState include `projectOverrides: Map<string, ProjectOverride>` and `setProjectOverride` action, but it's unclear if the Step 2 UI actually renders the per-project settings modal. `projectWriter.ts` applies the overrides if they exist. If the Step 2 modal is missing, the file-upload column path is the only way to set per-project overrides.
+- **Dependency scope toggle is unverified end-to-end** — `dependencyWriter.ts` and `projectOnline/dependencies.ts` are wired to `migrationScope.dependencies`, but the dependency fetch in `dependencies.ts` defines its own `runWithConcurrency` copy rather than using the shared one in `concurrency.ts`. Worth verifying both implementations behave consistently and running a smoke test with a project with known FS/SS dependencies. (small — verification + possible dedup)
 
-- **`schemaOrchestrator.ts` vs `schemaInspector.ts` boundary is blurry** — orchestrator centralizes schema creation; inspector does dataOnly reads. Both deal with the Dataverse schema layer but from opposite directions. If the project moves toward a unified schema service, these are the two files to merge or clearly delineate.
+- **`projectOnlineService.ts` is an orphan** — `src/services/projectOnlineService.ts` (connector-based `shared_projectonline` operations) is not imported anywhere in `src/`. Predates the OData-direct approach. Should be confirmed unused and deleted to reduce confusion. (trivial — tech debt)
 
-- **Warning cap (100/code+sheet) with no CSV escape hatch** — `fileImportService.ts` caps warnings at 100 per sheet+code combination. For a large upload (50k+ rows with many bad references) the user can't see all warnings. The CSV export of warnings (AC 32) was designed to bypass this cap but is not yet implemented.
+- **`schemaOrchestrator.ts` vs `schemaInspector.ts` boundary is blurry** — orchestrator drives schema creation (full/schemaOnly); inspector reads existing schema (dataOnly). Both handle Dataverse schema but from opposite directions. If the codebase grows toward a unified schema service, these are the two files to merge or more explicitly delineate. Not urgent. (medium — refactor, no user value)
+
+- **Warning cap (100/code+sheet) with no CSV escape hatch** — `fileImportService.ts` caps warnings at 100 per sheet+code combination via `pushWarning()`. For large uploads (50k+ rows) warnings are silently truncated. The CSV export (AC 32) was designed to bypass this cap but is not built. Tied to the warnings-wiring bullet above. (small, depends on AC 28–32)
 
 ---
 
