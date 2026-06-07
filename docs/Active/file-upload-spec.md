@@ -2,7 +2,7 @@
 
 > **Document type:** Implementation specification for Claude Code
 > **Target codebase:** Project Online Migrator (React + TypeScript + Power Apps Code App)
-> **Status:** Ready for implementation
+> **Status:** Partially implemented — loader + template (phases 1–11) complete; UI feedback (phases 12–17) pending
 > **Related specs:** `data-only-migration-spec.md`, `data-only-migration-spec-addendum-B.md`, `schema-only-migration-spec.md`, `import-control-spec.md`, `project-selection-spec.md`
 > **Suggested location in repo:** `docs/file-upload-spec.md`
 
@@ -29,6 +29,34 @@ Wat nog ontbreekt voordat dit pad productie-waardig is:
 - Strict bij **structurele wijzigingen** (sheet hernoemd, kolom hernoemd) — bestand wordt afgewezen met duidelijke melding
 - Soft bij **inhoudelijke fouten** (verkeerde FieldType, dangling reference, niet-parseerbare datum) — row geskipt, warning, rest van het bestand verwerkt
 - Mode-agnostisch — template levert puur data; `migrationMode` blijft een in-app keuze
+
+---
+
+## 1a. Implementation status
+
+> Added June 2026. Based on code audit of `src/services/fileImportService.ts`, `src/services/fileUpload/types.ts`, `src/steps/Step1Connect/index.tsx`, `src/steps/Step5Report/index.tsx`, `src/app/MigrationContext.tsx`.
+
+| Phase (§10) | Status | Built in | Notes |
+|---|---|---|---|
+| 1. `LoaderResult` shape + types | ✅ Done | `src/services/fileUpload/types.ts` | Types match spec; extra warning codes added (`UNKNOWN_SCHEDULE_MODE`, `WORKING_TIME_OUT_OF_RANGE`) |
+| 2. `_Meta` sheet | ✅ Done | `fileImportService.ts` — `parseMetaSheet`, `validateStructure` | `generateTemplate()` writes `_Meta`; version check implemented |
+| 3. Strict structural validation | ✅ Done | `fileImportService.ts` — `validateStructure()` | Required sheets + headers, case-insensitive rename detection |
+| 4. Soft per-row validation skeleton | ✅ Done | `fileImportService.ts` — `parseSheets()` | `warnings` accumulator + `pushWarning()` cap function |
+| 5. Reference integrity | ✅ Done | `fileImportService.ts` — Assignments, Dependencies, TeamMembers, Tasks.ParentTaskId |  |
+| 6. Date handling | ✅ Done | `fileImportService.ts` — `toISODate()` | `cellDates: true`; ISO text fallback; warn on unparseable |
+| 7. `DataverseLogicalName` + `OwnerName` | ✅ Done | `fileImportService.ts` | Both columns parsed + propagated in `PoFetchedData` |
+| 8. TeamMembers derivation | ✅ Done | `fileImportService.ts` | Empty sheet → derive from Assignments with `TEAMMEMBERS_DERIVED_FROM_ASSIGNMENTS` warning |
+| 9. FieldType / EntityType validation | ✅ Done | `fileImportService.ts` | `INVALID_FIELD_TYPE_SKIPPED`; EntityType defaults silently to `Project` on unknown value |
+| 10. Excel data validation dropdowns | ❌ Not done | — | SheetJS confirmed unable to write `!dataValidations` (see §8.1 resolution). Requires `exceljs`. |
+| 11. `_Instructions` sheet | ✅ Done | `fileImportService.ts` — `INSTRUCTIONS_ROWS` | Content includes working time columns (not in original spec) |
+| 12. UI: post-upload panel | 🟡 Partial | `Step1Connect/index.tsx` | `fetchedData` is set; `LoaderResult.warnings` are **discarded** — summary panel does not show warning count |
+| 13. UI: error panel for hard fails | 🟡 Partial | `Step1Connect/index.tsx` | `uploadError` shows `String(err)`, not the structured `LoaderFileError.errors[]` list |
+| 14. MigrationContext integration | ❌ Not done | — | `fileUploadWarnings: LoaderWarning[]` never added to MigrationState; reducer action `SET_FILE_UPLOAD_WARNINGS` not implemented |
+| 15. UI: Step 5 warnings section | ❌ Not done | — | Step5Report has no "File Upload Warnings" section |
+| 16. Step 5 CSV export | ❌ Not done | — | CSV export of warnings not implemented |
+| 17. End-to-end + regression tests | ⚠️ TODO | — | Manual verification only |
+
+**Summary:** Loader is production-ready; warnings surface in `LoaderResult` but are invisible to the user. Phases 12–16 are the remaining work.
 
 ---
 
@@ -871,16 +899,39 @@ Geschatte effort: 3–4 dagen development voor een ervaren dev op deze codebase.
 
 ---
 
-## 11. Open vragen (voor implementatie-tijd)
+## 11a. Deviations from original spec
 
-1. **SheetJS data validation support:** schrijft de huidige `xlsx` versie `!dataValidations` correct? Verifieer met een quick spike — open de gegenereerde file in Excel en check of dropdowns echt verschijnen. Fallback: switch naar `exceljs` voor `generateTemplate()`.
+Changes made during implementation that differ from what this document originally specified:
 
-2. **`CustomFieldTypeValue: 0` hardcoded in huidige loader:** wordt deze waarde ergens downstream gebruikt (writers, mapping)? Grep op `CustomFieldTypeValue`. Indien onbruikbaar: documenteer als "intentionally unused for file-uploaded data". Indien wel gebruikt: leid af uit `FieldType` (bv. `Lookup: 21, Text: 4` per PO type-codes).
+| Deviation | Original spec | Actual implementation | Why |
+|---|---|---|---|
+| `excelTemplate.ts` renamed | Spec assumes `src/services/excelTemplate.ts` | Renamed to `src/services/fileImportService.ts`; types split to `src/services/fileUpload/types.ts` | Better name; types needed in a separate module to avoid circular imports |
+| Working time columns in template | Not in original spec | `Projects` sheet has `WorkHourTemplateName`, `ScheduleMode`, `HoursPerDay`, `HoursPerWeek`, `DaysPerMonth` | Added when working-time-spec was implemented; file upload template is the per-project override mechanism |
+| Working time warning codes | Not in original `WarningCode` union | `UNKNOWN_SCHEDULE_MODE`, `WORKING_TIME_OUT_OF_RANGE` added to `WarningCode` in `fileUpload/types.ts` | Required by working time parsing in `fileImportService.ts` |
+| `fileUploadProjectOverrides` in `PoFetchedData` | Not in spec | `PoFetchedData` optionally carries `fileUploadProjectOverrides: FileUploadProjectOverride[]` | Mechanism to pass per-project working time overrides from loader to context |
+| `EntityType` unknown → silent default | Spec says "dropdown, unknown = row skip + warning" | Unknown `EntityType` defaults silently to `Project` | EntityType has a dropdown in the template; in practice unknown values are likely empty cells, not typos. Row-level skip was deemed too aggressive. |
+| `fileUploadWarnings` in MigrationState | Spec §7.3 adds this field | **Not added**. `parseWorkbook` returns warnings but Step1Connect discards them. | Not implemented yet — this is the key gap in the remaining phases. |
 
-3. **`_Instructions` sheet styling:** wide column A, wrapped text, gekleurde headers? Of plain en bare? **Aanbeveling:** plain met bold section headers; geen branding-werk in deze iteratie.
+---
+
+## 11b. Resolved questions
+
+Questions from §11 that have been answered during implementation:
+
+1. **SheetJS data validation support** (§11 Q1) — **Resolved: SheetJS 0.18.5 community build does NOT write `!dataValidations`.** Confirmed via spike: `generateTemplate()` produces the file, but opening in Excel shows no dropdowns. Switch to `exceljs` for `generateTemplate()` is the accepted path (parser stays on SheetJS). Deferred.
+
+2. **`CustomFieldTypeValue: 0` hardcoded** (§11 Q2) — **Resolved: value is unused in the file-upload write path.** Grep confirms writers don't reference `CustomFieldTypeValue` when processing FileUpload data. Documented with a FIXME comment in `fileImportService.ts`. Safe to leave as-is.
+
+---
+
+## 11. Open vragen (nog onopgelost)
+
+> Q1 en Q2 zijn beantwoord — zie §11b Resolved questions.
+
+3. **`_Instructions` sheet styling:** wide column A, wrapped text, gekleurde headers? Of plain en bare? — **Geïmplementeerd als plain met bold section headers.** Geen aanvullend werk nodig.
 
 4. **Choice/MultiChoice values aanleveren via template:** out of scope voor v2 zoals beschreven (gebruiker doet dit in Step 2). Indien klanten vragen om template-side definitie: voeg `ChoiceValues` sheet toe in v2.1 (analoog aan LookupValues, met `(ChoiceSetName, OptionLabel)` kolommen). Niet nu.
 
-5. **Warning cap per code+sheet:** §8.5 stelt 100 voor. Te laag voor grote files? **Aanbeveling:** 100 voor MVP; verhoog op feedback. CSV export bevat altijd alle warnings ongegroepeerd.
+5. **Warning cap per code+sheet:** geïmplementeerd op 100 (`WARNING_CAP` in `fileImportService.ts`). CSV export (AC 32) zou de volledige set moeten bevatten — maar die is nog niet gebouwd. Tot die tijd kan de cap een blinde vlek zijn bij zeer grote files.
 
-6. **Template-versie bump strategy:** als v2.1 een nieuwe optionele kolom toevoegt — accepteert v2.0-app dat? **Aanbeveling:** ja (forward-compat warning `TEMPLATE_VERSION_NEWER`), onbekende kolommen worden genegeerd. Major version bump (3.0) breekt expliciet: oude app weigert nieuwe template, nieuwe app weigert oude template.
+6. **Template-versie bump strategy:** geïmplementeerd via major-version check in `validateStructure()`: major < 2 → error; major > 2 → `TEMPLATE_VERSION_NEWER` warning; onbekende kolommen worden stil genegeerd. Schema voor v2.1 is dus backwards-compatible.
