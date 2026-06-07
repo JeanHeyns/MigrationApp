@@ -698,23 +698,22 @@ verwijder template → melding verdwijnt; defaults behouden → melding verdwijn
 
 ---
 
-## 12. Open questions
+## 12. Open questions — resolved
 
-1. **Sentinel-regel detectie in `LoaderFeedbackPanel`:** de loader voegt bij truncatie een
-   sentinel warning toe (zie `pushWarning()` in `fileImportService.ts` — de sentinel heeft
-   `message.startsWith('(')` en `n === WARNING_CAP + 1`). De UI moet die sentinels herkennen
-   om een nette "...and N more" banner te tonen i.p.v. de sentinel als normale warning.
-   **Opties:** (a) voeg een `isTruncationSentinel: true` vlag toe aan `LoaderWarning` in
-   `fileUpload/types.ts`, of (b) detecteer op basis van message-patroon in de component.
-   Optie (a) is schoner maar wijzigt het type. Optie (b) is fragiel. ⚠ Beslissen bij
-   implementatie van Phase B.
+1. **✅ Sentinel-regel detectie — RESOLVED:** Geen sentinels nodig. `row === undefined &&
+   column === undefined` = sheet-level warning. `LoaderWarning` type staat dit al toe.
+   Panel en CSV exporter branchet op `undefined`. Render `(sheet)` in row-kolom.
+   Truncation sentinels van `pushWarning()` zijn gewone warnings — worden meegetoond als
+   `(sheet)` entries; geen speciale detectie in de component.
 
-2. **`LoaderFeedbackPanel` locatie in de component tree:** het voorstel is
-   `src/components/FileUpload/LoaderFeedbackPanel.tsx`. Als er nog geen `components/FileUpload/`
-   directory bestaat, aanmaken. ⚠ TODO: verifieer welke components-directories al bestaan.
+2. **✅ Component directory — RESOLVED:** `src/components/LoaderFeedbackPanel/` met:
+   - `LoaderFeedbackPanel.tsx` — main component
+   - `index.ts` — re-export
+   - helpers als nodig
+   Shared tussen Step 1 en Step 5 → niet in step-directories.
 
-3. **Default-waarden voor de working-time mismatch check:** de vergelijking gebruikt
-   `DEFAULT_PROJECT_DEFAULTS.hoursPerDay` etc. die geïmporteerd worden uit
-   `src/types/projectDefaults.ts`. Verifieer dat die defaults overeenkomen met wat Dataverse
-   aanneemt als de velden niet ingevuld zijn (typisch 8 / 40 / 20). Als Dataverse andere
-   defaults heeft, is de drempel voor de mismatch-warning verkeerd.
+3. **✅ Working-time defaults — RESOLVED:** Hardcode MS Project defaults:
+   `hoursPerDay = 8`, `hoursPerWeek = 40`, `daysPerMonth = 20`.
+   Definieer als `MS_PROJECT_DEFAULTS` constante in working-time service file
+   (niet inline in warning-logica) zodat ze vindbaar zijn als MS ze ooit wijzigt.
+   Niet lezen uit Dataverse — heuristiek blijft lokaal.

@@ -4,6 +4,7 @@ import type { MappingConfiguration, OptionSetMapping } from '../models/mapping.t
 import type { AssociationAttempt, DvSolution, ImportResult, LogEntry, ProjectWriteDiagnostic } from '../models/plannerPremium.types'
 import type { MigrationMode, SchemaCreationResults, SchemaSnapshot, ResolverPlan, SkippedFieldInstance } from '../models/dataOnly.types'
 import type { WorkHourTemplate, ScheduleModeOption, ProjectDefaults, ProjectOverride } from '../types/projectDefaults'
+import type { LoaderWarning } from '../services/fileUpload/types'
 import { DEFAULT_PROJECT_DEFAULTS } from '../types/projectDefaults'
 import { clearDataverseOrgUrl, setDataverseOrgUrl } from '../config/environment'
 
@@ -101,6 +102,8 @@ interface MigrationState {
   scheduleModeOptions: ScheduleModeOption[]
   projectDefaults: ProjectDefaults
   projectOverrides: Map<string, ProjectOverride>
+  fileUploadWarnings: LoaderWarning[]
+  fileUploadFileName: string | undefined
 }
 
 interface MigrationActions {
@@ -151,6 +154,8 @@ interface MigrationActions {
   setProjectOverride: (override: ProjectOverride) => void
   clearProjectOverride: (projectId: string) => void
   clearAllProjectOverrides: () => void
+  setFileUploadResult: (warnings: LoaderWarning[], fileName: string) => void
+  clearFileUploadFeedback: () => void
 }
 
 type MigrationContextType = MigrationState & MigrationActions
@@ -163,7 +168,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [dataverseOrgUrl, setDataverseOrgUrlState] = useState<string | null>(null)
   const [dataverseUrlSource, setDataverseUrlSource] = useState<DataverseUrlSource>('loading')
   const [dataverseUrlError, setDataverseUrlErrorState] = useState<string | null>(null)
-  const [dataSource, setDataSource] = useState<DataSource>('ProjectOnline')
+  const [dataSource, setDataSourceState] = useState<DataSource>('ProjectOnline')
   const [selectedSolution, setSelectedSolution] = useState<DvSolution | null>(null)
   const [skipColumnCreation, setSkipColumnCreation] = useState(false)
   const [fetchedData, setFetchedDataState] = useState<PoFetchedData | null>(null)
@@ -188,6 +193,8 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   const [scheduleModeOptions, setScheduleModeOptionsState] = useState<ScheduleModeOption[]>([])
   const [projectDefaults, setProjectDefaultsState] = useState<ProjectDefaults>(DEFAULT_PROJECT_DEFAULTS)
   const [projectOverrides, setProjectOverridesState] = useState<Map<string, ProjectOverride>>(new Map())
+  const [fileUploadWarnings, setFileUploadWarningsState] = useState<LoaderWarning[]>([])
+  const [fileUploadFileName, setFileUploadFileNameState] = useState<string | undefined>(undefined)
 
   const setMigrationMode = useCallback((mode: MigrationMode) => {
     setMigrationModeState(mode)
@@ -350,10 +357,26 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
   }, [])
   const clearAllProjectOverrides = useCallback(() => setProjectOverridesState(new Map()), [])
 
+  const clearFileUploadFeedback = useCallback(() => {
+    setFileUploadWarningsState([])
+    setFileUploadFileNameState(undefined)
+  }, [])
+
+  const setFileUploadResult = useCallback((warnings: LoaderWarning[], fileName: string) => {
+    setFileUploadWarningsState(warnings)
+    setFileUploadFileNameState(fileName)
+  }, [])
+
+  const setDataSource = useCallback((source: DataSource) => {
+    setDataSourceState(source)
+    setFileUploadWarningsState([])
+    setFileUploadFileNameState(undefined)
+  }, [])
+
   const resetState = useCallback(() => {
     setCurrentStep(1)
     setPwaUrl('')
-    setDataSource('ProjectOnline')
+    setDataSourceState('ProjectOnline')
     setSelectedSolution(null)
     setSkipColumnCreation(false)
     setFetchedDataState(null)
@@ -378,6 +401,8 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
     setScheduleModeOptionsState([])
     setProjectDefaultsState(DEFAULT_PROJECT_DEFAULTS)
     setProjectOverridesState(new Map())
+    setFileUploadWarningsState([])
+    setFileUploadFileNameState(undefined)
     try { localStorage.removeItem('DEBUG_DATAONLY_WRITER') } catch { /* ignore */ }
   }, [])
 
@@ -391,6 +416,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       skippedFieldInstances, projectWriteDiagnostics, associationDiagnostics,
       migrationScope, importProgress, stopRequested, importWasStopped,
       workHourTemplates, scheduleModeOptions, projectDefaults, projectOverrides,
+      fileUploadWarnings, fileUploadFileName,
       setCurrentStep, nextStep, prevStep, setPwaUrl,
       setResolvedDataverseUrl, setDataverseUrlError, clearResolvedDataverseUrl,
       setDataSource,
@@ -409,6 +435,7 @@ export function MigrationProvider({ children }: { children: React.ReactNode }) {
       requestStop, clearStopRequest, setImportWasStopped,
       setWorkHourTemplates, setScheduleModeOptions, setProjectDefaults,
       setProjectOverride, clearProjectOverride, clearAllProjectOverrides,
+      setFileUploadResult, clearFileUploadFeedback,
     }}>
       {children}
     </MigrationContext.Provider>
