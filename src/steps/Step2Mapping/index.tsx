@@ -13,16 +13,18 @@ import { useMigration } from '../../app/MigrationContext'
 import {
   fetchEntityAttributes,
   fetchEntityDefinitions,
+  fetchEntityManyToOneRelationships,
   fetchEntityWithCustomAttributes,
   fetchGlobalOptionSetDefinitions,
   fetchSolutionComponentIds,
   fetchSolutionEntityIds,
+  type RawRelationshipMeta,
   type DvEntityAttribute,
   type DvEntityDefinition,
   type DvGlobalOptionSetDefinition,
 } from '../../services/dataverseService'
 import { toLogicalName } from '../../services/projectOnline/customFields'
-import { lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
+import { hasHierarchicalEntries, lookupEntityLogicalName } from '../../services/plannerPremium/lookupEntityManager'
 import type { PoCustomField, PoCustomFieldType, PoFetchedData, PoLookupTable } from '../../models/projectOnline.types'
 import type { DataverseColumnType, FieldMapping, MappingConfiguration, MultiLookupMapping, MultiLookupTargetShape } from '../../models/mapping.types'
 import type { ColumnMeta, ColumnMetaType, EntitySchema, NNRelationshipMeta, ResolverEntry, ResolverPlan, SchemaSnapshot } from '../../models/dataOnly.types'
@@ -147,6 +149,7 @@ const SCHEMA_TYPE_TO_DV_TYPE: Partial<Record<ColumnMetaType, DataverseColumnType
 }
 
 type FieldFilter = 'all' | 'active' | 'skipped' | 'project' | 'task' | 'resource'
+type SelfLookupOption = { lookupLogicalName: string; navigationPropertyName: string; label: string }
 
 // ─── dataOnly helpers ─────────────────────────────────────────────────────────
 
@@ -391,10 +394,7 @@ function buildSchemaOnlyMappings(data: PoFetchedData, prefix: string): FieldMapp
     const lookupTable = cf.CustomFieldLookupTableUID
       ? lookupMap.get(cf.CustomFieldLookupTableUID)
       : undefined
-    const targetColumnType =
-      cf.CustomFieldType === 'Lookup' && lookupTable
-        ? 'Lookup'
-        : SUGGESTED_DV_TYPE[cf.CustomFieldType]
+    const targetColumnType = SUGGESTED_DV_TYPE[cf.CustomFieldType]
     return {
       customField: cf,
       targetColumnType,
@@ -411,22 +411,71 @@ function buildSchemaOnlyMappings(data: PoFetchedData, prefix: string): FieldMapp
   })
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatTargetSummary(
+  m: FieldMapping,
+  prefix: string,
+): { text: string; isWarning: boolean } {
+  if (m.targetColumnType === 'Lookup' && m.lookupTable) {
+    if (m.useExistingLookupEntity && m.relatedEntity?.logicalName) {
+      return { text: `Use existing · ${m.relatedEntity.logicalName}`, isWarning: false }
+    }
+    const entityName = lookupEntityLogicalName(m.lookupTable, prefix)
+    const count = m.lookupTable.entries.length
+    return {
+      text: `Create lookup · ${entityName} · ${count} ${count === 1 ? 'entry' : 'entries'}`,
+      isWarning: count === 0,
+    }
+  }
+  if ((m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet') && m.lookupTable) {
+    if (m.optionSetName) {
+      return { text: `Reuse choice · ${m.optionSetName}`, isWarning: false }
+    }
+    const count = m.lookupTable.entries.length
+    return {
+      text: `Create choice · ${m.targetLogicalName} · ${count} ${count === 1 ? 'entry' : 'entries'}`,
+      isWarning: count === 0,
+    }
+  }
+  return { text: '', isWarning: false }
+}
+
+function toSelfLookupOptions(entityLogicalName: string, relationships: RawRelationshipMeta[]): SelfLookupOption[] {
+  return relationships
+    .filter(r => r.ReferencedEntity === entityLogicalName && r.ReferencingAttribute)
+    .map(r => ({
+      lookupLogicalName: r.ReferencingAttribute,
+      navigationPropertyName: r.ReferencingEntityNavigationPropertyName,
+      label: r.ReferencingAttribute,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+}
+
+function preferredSelfLookupOption(options: SelfLookupOption[]): SelfLookupOption | undefined {
+  if (options.length === 1) return options[0]
+  return options.find(option => option.lookupLogicalName.toLowerCase().includes('parent'))
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const useStyles = makeStyles({
   root: {
     padding: '32px',
-    maxWidth: '900px',
+    width: '100%',
+    maxWidth: '1080px',
     margin: '0 auto',
     display: 'flex',
     flexDirection: 'column',
     gap: '28px',
+    boxSizing: 'border-box',
   },
   title: { fontSize: '20px', fontWeight: '600', color: tokens.colorNeutralForeground1 },
   subtitle: { fontSize: '13px', color: tokens.colorNeutralForeground3, marginTop: '4px' },
   sectionTitle: { fontSize: '15px', fontWeight: '600', color: tokens.colorNeutralForeground1, marginBottom: '12px' },
   toolbar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
-  table: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
+  tableWrap: { width: '100%', overflowX: 'auto' },
+  table: { width: '100%', minWidth: '940px', borderCollapse: 'collapse', tableLayout: 'fixed', fontSize: '13px' },
   th: {
     textAlign: 'left',
     padding: '8px 10px',
@@ -439,7 +488,7 @@ const useStyles = makeStyles({
   td: {
     padding: '7px 10px',
     borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-    verticalAlign: 'middle',
+    verticalAlign: 'top',
   },
   trSkipped: { opacity: 0.45 },
   entityBadge: {
@@ -454,6 +503,7 @@ const useStyles = makeStyles({
     fontSize: '11px',
     color: tokens.colorNeutralForeground3,
     fontFamily: 'Consolas, monospace',
+    overflowWrap: 'anywhere',
   },
   fieldNameCell: { display: 'flex', flexDirection: 'column', gap: '3px' },
   fieldNameBadgeRow: { display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' },
@@ -468,12 +518,71 @@ const useStyles = makeStyles({
     textUnderlineOffset: '2px',
   },
   selectFixed: {
-    width: '190px',
-    maxWidth: '190px',
+    width: '100%',
+    maxWidth: '210px',
+    minWidth: '0',
     overflow: 'hidden',
+  },
+  targetCell: { minWidth: 0 },
+  targetStack: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    width: '100%',
+    maxWidth: '460px',
+    minWidth: 0,
+  },
+  targetControl: {
+    width: '100%',
+    minWidth: '0',
+    maxWidth: '460px',
   },
   footer: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' },
   summary: { fontSize: '13px', color: tokens.colorNeutralForeground3 },
+  helperText: {
+    minHeight: '18px',
+    fontSize: '11px',
+    color: tokens.colorNeutralForeground3,
+    fontFamily: 'Consolas, monospace',
+    whiteSpace: 'normal',
+    overflowWrap: 'anywhere',
+    lineHeight: '16px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  helperTextWarning: {
+    minHeight: '18px',
+    fontSize: '11px',
+    color: tokens.colorStatusWarningForeground1,
+    fontFamily: 'Consolas, monospace',
+    whiteSpace: 'normal',
+    overflowWrap: 'anywhere',
+    lineHeight: '16px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  targetBadge: {
+    display: 'inline-block',
+    flex: '0 0 auto',
+    padding: '1px 6px',
+    borderRadius: '8px',
+    fontSize: '10px',
+    fontWeight: '600',
+    marginRight: '4px',
+    verticalAlign: 'middle',
+  },
+  overrideChip: {
+    display: 'inline-block',
+    marginTop: '4px',
+    padding: '1px 7px',
+    borderRadius: '8px',
+    fontSize: '10px',
+    fontWeight: '600',
+    backgroundColor: tokens.colorStatusWarningBackground1,
+    color: tokens.colorStatusWarningForeground1,
+  },
 })
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -496,6 +605,7 @@ export function Step2Mapping() {
   const [dvAttributes, setDvAttributes] = useState<DvEntityAttribute[]>([])
   const [dvAttrError, setDvAttrError] = useState<string | null>(null)
   const [dvEntities, setDvEntities] = useState<DvEntityDefinition[]>([])
+  const [selfLookupOptions, setSelfLookupOptions] = useState<Record<string, SelfLookupOption[]>>({})
   const [solutionEntityIds, setSolutionEntityIds] = useState<Set<string>>(new Set())
   const [globalOptionSets, setGlobalOptionSets] = useState<DvGlobalOptionSetDefinition[]>([])
   const [solutionOptionSetIds, setSolutionOptionSetIds] = useState<Set<string>>(new Set())
@@ -559,6 +669,59 @@ export function Step2Mapping() {
       .catch(() => { /* non-fatal */ })
   }, [])
 
+  useEffect(() => {
+    const entityNames = Array.from(new Set(fieldMappings
+      .filter(m =>
+        !m.skip &&
+        m.targetColumnType === 'Lookup' &&
+        !!m.lookupTable &&
+        hasHierarchicalEntries(m.lookupTable) &&
+        m.useExistingLookupEntity &&
+        !!m.relatedEntity?.logicalName
+      )
+      .map(m => m.relatedEntity!.logicalName)
+      .filter(entity => !selfLookupOptions[entity])
+    ))
+
+    for (const entityName of entityNames) {
+      fetchEntityManyToOneRelationships(entityName)
+        .then(rels => setSelfLookupOptions(prev => ({
+          ...prev,
+          [entityName]: toSelfLookupOptions(entityName, rels),
+        })))
+        .catch(() => setSelfLookupOptions(prev => ({ ...prev, [entityName]: [] })))
+    }
+  }, [fieldMappings, selfLookupOptions])
+
+  useEffect(() => {
+    setFieldMappings(prev => {
+      let changed = false
+      const next = prev.map(m => {
+        if (
+          m.skip ||
+          m.targetColumnType !== 'Lookup' ||
+          !m.lookupTable ||
+          !hasHierarchicalEntries(m.lookupTable) ||
+          !m.useExistingLookupEntity ||
+          !m.relatedEntity?.logicalName ||
+          m.lookupParent
+        ) return m
+
+        const preferred = preferredSelfLookupOption(selfLookupOptions[m.relatedEntity.logicalName] ?? [])
+        if (!preferred) return m
+        changed = true
+        return {
+          ...m,
+          lookupParent: {
+            lookupLogicalName: preferred.lookupLogicalName,
+            navigationPropertyName: preferred.navigationPropertyName,
+          },
+        }
+      })
+      return changed ? next : prev
+    })
+  }, [selfLookupOptions])
+
   // Load entity IDs in the selected solution so the table picker can be filtered
   useEffect(() => {
     if (!selectedSolution?.solutionid) return
@@ -594,7 +757,10 @@ export function Step2Mapping() {
   // ── Field mapping handlers ────────────────────────────────────────────────
 
   function setFieldType(idx: number, type: DataverseColumnType) {
-    setFieldMappings(prev => prev.map((m, i) => i === idx ? { ...m, targetColumnType: type } : m))
+    setFieldMappings(prev => prev.map((m, i) => i === idx
+      ? { ...m, targetColumnType: type, lookupParent: type === 'Lookup' ? m.lookupParent : undefined }
+      : m
+    ))
   }
 
   function setFieldSkip(idx: number, skip: boolean) {
@@ -625,6 +791,7 @@ export function Step2Mapping() {
         return {
           ...m,
           useExistingLookupEntity: false,
+          lookupParent: undefined,
           relatedEntity: m.lookupTable
             ? { logicalName: lookupEntityLogicalName(m.lookupTable, prefix), logicalCollectionName: '' }
             : undefined,
@@ -634,7 +801,26 @@ export function Step2Mapping() {
       return {
         ...m,
         useExistingLookupEntity: true,
+        lookupParent: undefined,
         relatedEntity: entity ? { logicalName: entity.logicalName, logicalCollectionName: entity.logicalCollectionName } : undefined,
+      }
+    }))
+  }
+
+  function setLookupParent(idx: number, lookupLogicalName: string) {
+    setFieldMappings(prev => prev.map((m, i) => {
+      if (i !== idx) return m
+      if (!lookupLogicalName || !m.relatedEntity?.logicalName) return { ...m, lookupParent: undefined }
+      const option = (selfLookupOptions[m.relatedEntity.logicalName] ?? [])
+        .find(o => o.lookupLogicalName === lookupLogicalName)
+      return {
+        ...m,
+        lookupParent: option
+          ? {
+              lookupLogicalName: option.lookupLogicalName,
+              navigationPropertyName: option.navigationPropertyName,
+            }
+          : undefined,
       }
     }))
   }
@@ -943,6 +1129,36 @@ export function Step2Mapping() {
       })
     : []
 
+  // ── Derived display state ───────────────────────────────────────────────────
+
+  // Fields where a create-with-0-entries will happen (likely a data fetch issue)
+  const warningFields = fieldMappings.filter(m => {
+    if (m.skip || m.useExistingField || m.useExistingLookupEntity) return false
+    return m.lookupTable !== undefined && m.lookupTable.entries.length === 0
+  })
+
+  // Count how many active fields resolve to each target (choice / lookup entity)
+  // so we can mark targets shared across multiple source fields
+  const targetShareCount = new Map<string, number>()
+  for (const m of fieldMappings) {
+    if (m.skip || m.useExistingField || m.useExistingLookupEntity) continue
+    const key =
+      (m.targetColumnType === 'Lookup' && m.lookupTable)
+        ? lookupEntityLogicalName(m.lookupTable, prefix)
+        : ((m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet') && m.lookupTable)
+          ? (m.optionSetName ?? m.targetLogicalName)
+          : null
+    if (key) targetShareCount.set(key, (targetShareCount.get(key) ?? 0) + 1)
+  }
+
+  // Hide per-row entity badge when all displayed fields are the same entity type
+  const uniqueDisplayedEntityTypes = new Set(
+    displayedFieldEntries.map(e => e.mapping.customField.CustomFieldEntityType)
+  )
+  const showEntityBadgePerRow = uniqueDisplayedEntityTypes.size > 1
+  // Entity type shown once as a header label when all rows are the same
+  const singleEntityType = showEntityBadgePerRow ? null : [...uniqueDisplayedEntityTypes][0] ?? null
+
   return (
     <div className={styles.root}>
       <div>
@@ -1017,11 +1233,13 @@ export function Step2Mapping() {
         {migrationMode === 'schemaOnly' ? (
           <span className={styles.summary}>
             {activeFields.length} field{activeFields.length !== 1 ? 's' : ''} will be created, {fieldMappings.length - activeFields.length} skipped
+            {warningFields.length > 0 && <>, <span style={{ color: tokens.colorStatusWarningForeground1, fontWeight: '600' }}>{warningFields.length} warning{warningFields.length !== 1 ? 's' : ''}</span></>}
             {fieldFilter !== 'all' ? ` · showing ${displayedFieldEntries.length} filtered` : ''}
           </span>
         ) : (
         <span className={styles.summary}>
           {activeFields.length} of {fieldMappings.length} fields active · {migratingFields.length} value(s) will migrate
+          {warningFields.length > 0 && <> · <span style={{ color: tokens.colorStatusWarningForeground1, fontWeight: '600' }}>{warningFields.length} warning{warningFields.length !== 1 ? 's' : ''}</span></>}
           {fieldFilter !== 'all' ? ` · showing ${displayedFieldEntries.length} filtered` : ''}
         </span>
         )}
@@ -1029,29 +1247,48 @@ export function Step2Mapping() {
 
       {/* ── Field mapping table ── */}
       <div>
-        <div className={styles.sectionTitle}>Custom Field Mapping ({fieldMappings.length} fields)</div>
+        <div className={styles.sectionTitle}>
+          Custom Field Mapping ({fieldMappings.length} fields)
+          {singleEntityType && (
+            <span
+              className={styles.entityBadge}
+              style={{ background: ENTITY_COLORS[singleEntityType] ?? '#888', marginLeft: '10px', verticalAlign: 'middle' }}
+            >
+              {singleEntityType}
+            </span>
+          )}
+        </div>
         {migrationMode !== 'schemaOnly' && dvAttrError && (
           <MessageBar intent="warning" style={{ marginBottom: '8px' }}>
             <MessageBarBody>Could not load existing Dataverse fields: {dvAttrError}</MessageBarBody>
           </MessageBar>
         )}
+        <div className={styles.tableWrap}>
         <table className={styles.table}>
+          <colgroup>
+            <col style={{ width: '48px' }} />
+            <col style={{ width: '31%' }} />
+            <col style={{ width: '92px' }} />
+            <col style={{ width: '220px' }} />
+            <col />
+            {migrationMode === 'full' && <col style={{ width: '96px' }} />}
+          </colgroup>
           <thead>
             <tr>
-              <th className={styles.th} style={{ width: '40px' }}>Skip</th>
+              <th className={styles.th}>Skip</th>
               <th className={styles.th}>Field Name</th>
               <th className={styles.th} style={{ whiteSpace: 'nowrap' }}>PO Type</th>
-              <th className={styles.th} style={{ width: '140px', whiteSpace: 'nowrap' }}>Migrate as</th>
+              <th className={styles.th} style={{ whiteSpace: 'nowrap' }}>Migrate as</th>
               <th className={styles.th}>Dataverse Target</th>
               {migrationMode === 'full' && (
-                <th className={styles.th} style={{ width: '88px', textAlign: 'center' }}>Migrate value</th>
+                <th className={styles.th} style={{ textAlign: 'center' }}>Migrate value</th>
               )}
             </tr>
           </thead>
           <tbody>
             {displayedFieldEntries.length === 0 && (
               <tr>
-                <td className={styles.td} colSpan={6} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
+                <td className={styles.td} colSpan={migrationMode === 'full' ? 6 : 5} style={{ textAlign: 'center', color: tokens.colorNeutralForeground3 }}>
                   {fieldMappings.length === 0 ? 'No custom fields found in Project Online.' : 'No fields match the current filter.'}
                 </td>
               </tr>
@@ -1063,6 +1300,27 @@ export function Step2Mapping() {
               const targetShape: MultiLookupTargetShape = mlMapping?.targetShape ?? (isLookupMulti ? 'MultiChoice' : 'MultiChoice')
               const isNN = isLookupMulti && targetShape === 'N:N'
 
+              // Per-row display state
+              const targetSummary = (!m.skip && !m.useExistingField && !isNN)
+                ? formatTargetSummary(m, prefix)
+                : { text: '', isWarning: false }
+              const rowTargetKey =
+                (!m.skip && !m.useExistingField && !m.useExistingLookupEntity)
+                  ? ((m.targetColumnType === 'Lookup' && m.lookupTable)
+                    ? lookupEntityLogicalName(m.lookupTable, prefix)
+                    : ((m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet') && m.lookupTable)
+                      ? (m.optionSetName ?? m.targetLogicalName)
+                      : null)
+                  : null
+              const isSharedTarget = rowTargetKey !== null && (targetShareCount.get(rowTargetKey) ?? 0) > 1
+              const isExistingTarget = m.useExistingField || !!m.useExistingLookupEntity
+              const isOverridden = !m.skip && !isLookupMulti
+                && m.targetColumnType !== SUGGESTED_DV_TYPE[m.customField.CustomFieldType]
+              const isHierarchicalLookup = !!m.lookupTable && hasHierarchicalEntries(m.lookupTable)
+              const rowSelfLookupOptions = m.relatedEntity?.logicalName
+                ? (selfLookupOptions[m.relatedEntity.logicalName] ?? [])
+                : []
+
               return (
               <tr
                 key={m.customField.CustomFieldId}
@@ -1072,7 +1330,7 @@ export function Step2Mapping() {
               >
 
                 {/* Col 1: Skip */}
-                <td className={styles.td}>
+                <td className={styles.td} style={{ paddingTop: '5px' }}>
                   <Checkbox checked={m.skip} onChange={(_, d) => setFieldSkip(idx, !!d.checked)} />
                 </td>
 
@@ -1101,12 +1359,14 @@ export function Step2Mapping() {
                         return <span title="Manual selection required">🟡</span>
                       })()}
                       <strong style={{ fontSize: '13px' }}>{m.customField.CustomFieldName}</strong>
-                      <span
-                        className={styles.entityBadge}
-                        style={{ background: ENTITY_COLORS[m.customField.CustomFieldEntityType] ?? '#888' }}
-                      >
-                        {m.customField.CustomFieldEntityType}
-                      </span>
+                      {showEntityBadgePerRow && (
+                        <span
+                          className={styles.entityBadge}
+                          style={{ background: ENTITY_COLORS[m.customField.CustomFieldEntityType] ?? '#888' }}
+                        >
+                          {m.customField.CustomFieldEntityType}
+                        </span>
+                      )}
                     </div>
                     <span className={styles.logicalName}>{m.targetLogicalName}</span>
                     {isNN && !m.skip && (
@@ -1118,15 +1378,16 @@ export function Step2Mapping() {
                 </td>
 
                 {/* Col 3: PO Type */}
-                <td className={styles.td} style={{ whiteSpace: 'nowrap', color: tokens.colorNeutralForeground2 }}>
+                <td className={styles.td} style={{ whiteSpace: 'nowrap', color: tokens.colorNeutralForeground2, paddingTop: '10px' }}>
                   {m.customField.CustomFieldType}
                 </td>
 
-                {/* Col 4: Migrate as — only relevant for LookupMulti */}
+                {/* Col 4: Migrate as */}
                 <td className={styles.td}>
-                  {isLookupMulti && !m.skip
-                    ? <>
-                        <Select
+                  {m.skip
+                    ? <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                    : isLookupMulti
+                      ? <Select
                           size="small"
                           className={styles.selectFixed}
                           value={targetShape}
@@ -1138,49 +1399,57 @@ export function Step2Mapping() {
                           <option value="MultiChoice">MultiChoice</option>
                           <option value="N:N">N:N relationship</option>
                         </Select>
-                      </>
-                    : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
+                      : migrationMode === 'schemaOnly'
+                        ? <>
+                            <Select
+                              size="small"
+                              className={styles.selectFixed}
+                              value={m.targetColumnType}
+                              title={DV_TYPE_LABELS[m.targetColumnType]}
+                              onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
+                            >
+                              {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
+                                <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
+                              ))}
+                            </Select>
+                            {isOverridden && (
+                              <div className={styles.overrideChip}>
+                                Changed from {DV_TYPE_LABELS[SUGGESTED_DV_TYPE[m.customField.CustomFieldType]]}
+                              </div>
+                            )}
+                          </>
+                        : <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
                   }
                 </td>
 
                 {/* Col 5: Dataverse Target */}
-                <td className={styles.td}>
+                <td className={`${styles.td} ${styles.targetCell}`}>
                   {m.skip
                     ? <span style={{ color: tokens.colorNeutralForeground4, fontSize: '12px' }}>—</span>
                     : isNN
                       ? <span style={{ fontSize: '12px', color: tokens.colorNeutralForeground3, fontStyle: 'italic' }}>↓ see N:N panel below</span>
                     : migrationMode === 'schemaOnly'
-                      ? <>
-                          {m.customField.CustomFieldType !== 'LookupMulti' && (
-                            <Input
-                              size="small"
-                              className={styles.selectFixed}
-                              value={m.targetDisplayName ?? m.customField.CustomFieldName}
-                              onChange={e => setFieldCreateName(idx, e.target.value)}
-                              placeholder="Column display name"
-                              style={{ marginBottom: '6px' }}
-                            />
-                          )}
-                          <Select
+                      ? <div className={styles.targetStack}>
+                          <Input
                             size="small"
-                            className={styles.selectFixed}
-                            value={m.targetColumnType}
-                            title={DV_TYPE_LABELS[m.targetColumnType]}
-                            onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
-                          >
-                            {(DV_TYPE_ALTERNATIVES[m.customField.CustomFieldType] ?? [m.targetColumnType]).map(t => (
-                              <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
-                            ))}
-                          </Select>
+                            className={styles.targetControl}
+                            value={m.targetDisplayName ?? m.customField.CustomFieldName}
+                            onChange={e => setFieldCreateName(idx, e.target.value)}
+                            placeholder="Display name"
+                          />
                           {m.targetColumnType === 'Lookup' && m.lookupTable && (
                             <Select
                               size="small"
-                              className={styles.selectFixed}
+                              className={styles.targetControl}
                               value={m.useExistingLookupEntity ? (m.relatedEntity?.logicalName ?? '') : '__create'}
+                              title={m.useExistingLookupEntity
+                                ? (m.relatedEntity?.logicalName ?? '')
+                                : lookupEntityLogicalName(m.lookupTable, prefix)}
                               onChange={(_, d) => setSchemaOnlyLookupSource(idx, d.value)}
-                              style={{ marginTop: '6px' }}
                             >
-                              <option value="__create">Create lookup table: {lookupEntityLogicalName(m.lookupTable, prefix)}</option>
+                              <option value="__create" title={lookupEntityLogicalName(m.lookupTable, prefix)}>
+                                Create lookup table: {lookupEntityLogicalName(m.lookupTable, prefix)}
+                              </option>
                               {solutionEntities.map(e => (
                                 <option key={e.logicalName} value={e.logicalName} title={`${e.displayName} (${e.logicalName})`}>
                                   Use existing: {e.displayName} ({e.logicalName})
@@ -1188,15 +1457,35 @@ export function Step2Mapping() {
                               ))}
                             </Select>
                           )}
+                          {m.targetColumnType === 'Lookup' && m.lookupTable && m.useExistingLookupEntity && isHierarchicalLookup && (
+                            <Select
+                              size="small"
+                              className={styles.targetControl}
+                              value={m.lookupParent?.lookupLogicalName ?? ''}
+                              title="Self-referencing parent lookup used for hierarchical Project Online lookup values"
+                              onChange={(_, d) => setLookupParent(idx, d.value)}
+                            >
+                              <option value="">
+                                {rowSelfLookupOptions.length === 0 ? 'Parent: no self lookup found (flat)' : 'Parent: seed flat values'}
+                              </option>
+                              {rowSelfLookupOptions.map(option => (
+                                <option key={option.lookupLogicalName} value={option.lookupLogicalName} title={option.navigationPropertyName}>
+                                  Parent: {option.label}
+                                </option>
+                              ))}
+                            </Select>
+                          )}
                           {(m.targetColumnType === 'OptionSet' || m.targetColumnType === 'MultiSelectOptionSet') && m.lookupTable && (
                             <Select
                               size="small"
-                              className={styles.selectFixed}
+                              className={styles.targetControl}
                               value={m.optionSetName ?? '__create'}
+                              title={m.optionSetName ?? m.targetLogicalName}
                               onChange={(_, d) => setSchemaOnlyOptionSetSource(idx, d.value)}
-                              style={{ marginTop: '6px' }}
                             >
-                              <option value="__create">Create choice: {m.targetLogicalName}</option>
+                              <option value="__create" title={m.targetLogicalName}>
+                                Create choice: {m.targetLogicalName}
+                              </option>
                               {solutionChoices.map(os => (
                                 <option key={os.name} value={os.name} title={`${os.displayName} (${os.name})`}>
                                   Use existing: {os.displayName} ({os.name})
@@ -1204,19 +1493,26 @@ export function Step2Mapping() {
                               ))}
                             </Select>
                           )}
-                          {m.targetColumnType === 'Lookup' && m.lookupTable && (
-                            <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
-                              {m.useExistingLookupEntity
-                                ? 'Will create a lookup column to the selected table.'
-                                : <>Will create lookup entity {lookupEntityLogicalName(m.lookupTable, prefix)} with {m.lookupTable.entries.length} entries</>}
+                          {targetSummary.text && (
+                            <div
+                              className={targetSummary.isWarning ? styles.helperTextWarning : styles.helperText}
+                              title={
+                                m.targetColumnType === 'Lookup' && m.lookupTable && m.targetLogicalName !== lookupEntityLogicalName(m.lookupTable, prefix)
+                                  ? `Column: ${m.targetLogicalName} — lookup entity named differently from source field`
+                                  : undefined
+                              }
+                            >
+                              {targetSummary.isWarning && '⚠ '}
+                              {isExistingTarget
+                                ? <span className={styles.targetBadge} style={{ background: '#107c10', color: '#fff' }}>Exists</span>
+                                : isSharedTarget
+                                  ? <span className={styles.targetBadge} style={{ background: '#7719aa', color: '#fff' }}>Shared</span>
+                                  : <span className={styles.targetBadge} style={{ background: '#0078d4', color: '#fff' }}>New</span>
+                              }
+                              {targetSummary.text}
                             </div>
                           )}
-                          {m.targetColumnType !== 'Lookup' && m.lookupTable && (
-                            <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
-                              {m.lookupTable.LookupTableName} Â· {m.lookupTable.entries.length} entries
-                            </div>
-                          )}
-                        </>
+                        </div>
                     : migrationMode === 'dataOnly'
                       ? (() => {
                           const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
@@ -1231,7 +1527,7 @@ export function Step2Mapping() {
                           return (
                             <Select
                               size="small"
-                              className={styles.selectFixed}
+                              className={styles.targetControl}
                               value={m.useExistingField ? m.targetLogicalName : ''}
                               onChange={(_, d) => {
                                 const col = compatible.find(c => c.logicalName === d.value)
@@ -1247,7 +1543,7 @@ export function Step2Mapping() {
                             </Select>
                           )
                         })()
-                      : <>
+                      : <div className={styles.targetStack}>
                           <div className={styles.modeToggle}>
                             <button
                               className={styles.modeLink}
@@ -1274,19 +1570,16 @@ export function Step2Mapping() {
                           </div>
                           {!m.useExistingField
                             ? <>
-                                {m.customField.CustomFieldType !== 'LookupMulti' && (
-                                  <Input
-                                    size="small"
-                                    className={styles.selectFixed}
-                                    value={m.targetDisplayName ?? m.customField.CustomFieldName}
-                                    onChange={e => setFieldCreateName(idx, e.target.value)}
-                                    placeholder="Column display name"
-                                    style={{ marginBottom: '6px' }}
-                                  />
-                                )}
+                                <Input
+                                  size="small"
+                                  className={styles.targetControl}
+                                  value={m.targetDisplayName ?? m.customField.CustomFieldName}
+                                  onChange={e => setFieldCreateName(idx, e.target.value)}
+                                  placeholder="Display name"
+                                />
                                 <Select
                                   size="small"
-                                  className={styles.selectFixed}
+                                  className={styles.targetControl}
                                   value={m.targetColumnType}
                                   title={DV_TYPE_LABELS[m.targetColumnType]}
                                   onChange={(_, d) => setFieldType(idx, d.value as DataverseColumnType)}
@@ -1295,14 +1588,18 @@ export function Step2Mapping() {
                                     <option key={t} value={t} title={DV_TYPE_LABELS[t]}>{DV_TYPE_LABELS[t]}</option>
                                   ))}
                                 </Select>
+                                {isOverridden && (
+                                  <div className={styles.overrideChip}>
+                                    Changed from {DV_TYPE_LABELS[SUGGESTED_DV_TYPE[m.customField.CustomFieldType]]}
+                                  </div>
+                                )}
                                 {m.targetColumnType === 'Lookup' && (
                                   <Select
                                     size="small"
-                                    className={styles.selectFixed}
+                                    className={styles.targetControl}
                                     value={m.relatedEntity?.logicalName ?? ''}
                                     title={dvEntities.find(e => e.logicalName === m.relatedEntity?.logicalName)?.displayName ?? ''}
                                     onChange={(_, d) => setFieldRelatedEntity(idx, d.value)}
-                                    style={{ marginTop: '6px' }}
                                   >
                                     <option value="">— pick related table —</option>
                                     {dvEntities
@@ -1314,15 +1611,27 @@ export function Step2Mapping() {
                                       ))}
                                   </Select>
                                 )}
-                                {m.targetColumnType !== 'Lookup' && m.lookupTable && (
-                                  <div style={{ marginTop: '4px', fontSize: '12px', color: tokens.colorNeutralForeground3 }}>
-                                    {m.lookupTable.LookupTableName} · {m.lookupTable.entries.length} entries
+                                {targetSummary.text && (
+                                  <div
+                                    className={targetSummary.isWarning ? styles.helperTextWarning : styles.helperText}
+                                    title={
+                                      m.targetColumnType === 'Lookup' && m.lookupTable && m.targetLogicalName !== lookupEntityLogicalName(m.lookupTable, prefix)
+                                        ? `Column: ${m.targetLogicalName} — lookup entity named differently from source field`
+                                        : undefined
+                                    }
+                                  >
+                                    {targetSummary.isWarning && '⚠ '}
+                                    {isSharedTarget
+                                      ? <span className={styles.targetBadge} style={{ background: '#7719aa', color: '#fff' }}>Shared</span>
+                                      : <span className={styles.targetBadge} style={{ background: '#0078d4', color: '#fff' }}>New</span>
+                                    }
+                                    {targetSummary.text}
                                   </div>
                                 )}
                               </>
                             : <Select
                                 size="small"
-                                className={styles.selectFixed}
+                                className={styles.targetControl}
                                 value={m.useExistingField ? m.targetLogicalName : ''}
                                 title={dvAttributes.find(a => a.logicalName === m.targetLogicalName)?.displayName ?? ''}
                                 onChange={(_, d) => {
@@ -1341,13 +1650,13 @@ export function Step2Mapping() {
                                 }
                               </Select>
                           }
-                        </>
+                        </div>
                   }
                 </td>
 
                 {/* Col 6: Migrate value */}
                 {migrationMode === 'full' && (
-                  <td className={styles.td} style={{ textAlign: 'center' }}>
+                  <td className={styles.td} style={{ textAlign: 'center', paddingTop: '5px' }}>
                     <Checkbox
                       checked={m.migrateValue}
                       disabled={m.skip || m.customField.CustomFieldEntityType === 'Task'}
@@ -1360,6 +1669,7 @@ export function Step2Mapping() {
             )})}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* ── Multi-value Lookup Fields (LookupMulti) — N:N panel ── */}

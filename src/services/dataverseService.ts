@@ -945,7 +945,7 @@ export async function createOneToManyRelationship(params: {
   }
 }
 
-interface RawRelationshipMeta {
+export interface RawRelationshipMeta {
   ReferencingAttribute: string
   ReferencingEntityNavigationPropertyName: string
   ReferencedEntity: string

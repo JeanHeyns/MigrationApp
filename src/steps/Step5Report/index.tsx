@@ -15,7 +15,7 @@ import type { SchemaCreationResults, SkippedFieldInstance } from '../../models/d
 const useStyles = makeStyles({
   root: {
     padding: '32px',
-    maxWidth: '1100px',
+    maxWidth: '760px',
     margin: '0 auto',
     display: 'flex',
     flexDirection: 'column',

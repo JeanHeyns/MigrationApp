@@ -49,7 +49,7 @@ import { getConcurrencyLimit, runWithConcurrency } from '../../services/plannerP
 import { useBrowserCloseGuard } from '../../hooks/useBrowserCloseGuard'
 
 const useStyles = makeStyles({
-  root: { padding: '32px', maxWidth: '1100px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' },
+  root: { padding: '32px', maxWidth: '760px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' },
   title: { fontSize: '20px', fontWeight: '600', color: tokens.colorNeutralForeground1 },
   subtitle: { fontSize: '13px', color: tokens.colorNeutralForeground3, marginTop: '4px' },
   toolbar: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' },
