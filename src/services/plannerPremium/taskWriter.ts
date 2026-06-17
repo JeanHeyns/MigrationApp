@@ -3,7 +3,10 @@ import type { MappingConfiguration, OptionSetMapping } from '../../models/mappin
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords } from './dataverseClient'
 import { chunks, cleanGuid, getRecordId, nowError, sourceGuidOrNew } from './importHelpers'
-import { createOperationSet, executeOperationSet, executeOperationSetWithRetry, queueScheduleCreate, queueScheduleDelete } from './scheduleApi'
+import { abandonOperationSet, createOperationSet, executeOperationSet, executeOperationSetWithRetry, queueScheduleCreate, queueScheduleDelete, queueScheduleUpdate } from './scheduleApi'
+import { calendarWorkingDaysInclusive, type ProjectCalendar } from './calendarReader'
+import { taskDurationDays, DEFAULT_HOURS_PER_DAY } from './scheduleMath'
+import { debugSchedule } from './scheduleDebug'
 
 const TASK_MATERIALIZATION_MAX_ATTEMPTS = 5
 const TASK_MATERIALIZATION_DELAY_MS = 20000
@@ -29,6 +32,7 @@ export async function writeTasks(
   projectIdMap: Record<string, string>,
   mappingConfig: MappingConfiguration,
   optionSetMappings: OptionSetMapping[] = [],
+  hoursPerDay: number = DEFAULT_HOURS_PER_DAY,
   onProgress?: (result: TaskWriteResult) => void,
 ): Promise<TaskWriteResult[]> {
   void mappingConfig
@@ -91,7 +95,7 @@ export async function writeTasks(
         const ops = ready.map(task => {
           const taskId = sourceGuidOrNew(task.TaskId)
           taskIdMap[task.TaskId] = taskId
-          return { id: task.TaskId, entity: buildTaskEntity(task, taskId, dvProjectId, bucket) }
+          return { id: task.TaskId, entity: buildTaskEntity(task, taskId, dvProjectId, bucket, hoursPerDay) }
         })
 
         const batchResult = await executeOperationSetWithRetry(
@@ -117,9 +121,11 @@ export async function writeTasks(
           }
           results.push(result)
           onProgress?.(result)
-          // For AlreadyExists, still track in committedLevels so deps can resolve
+          // For AlreadyExists, still track in committedLevels so deps can resolve.
+          // Use the normalized level (ready), matching the success path above — the
+          // pre-normalized level would mis-anchor children and re-trigger E_DEMOTETOOFAR.
           if (errorClass === 'AlreadyExists') {
-            committedLevels.set(op.id, pending.find(t => t.TaskId === op.id)?.TaskOutlineLevel ?? 1)
+            committedLevels.set(op.id, ready.find(t => t.TaskId === op.id)?.TaskOutlineLevel ?? 1)
           }
         }
       }
@@ -138,7 +144,104 @@ export async function writeTasks(
       onProgress?.(result)
     }
 
-    await remapMaterializedTaskIds(dvProjectId, pending, results)
+    await remapMaterializedTaskIds(dvProjectId, pending, results, hoursPerDay)
+  }
+
+  return results
+}
+
+export interface ScheduleCorrectionResult {
+  poTaskId: string
+  start: string
+  durationDays: number
+  success: boolean
+  error?: ImportError
+}
+
+/**
+ * Post-assignment schedule correction for Fixed Effort projects.
+ *
+ * Two things move dates away from the imported schedule after tasks are created:
+ *  1. Fixed Effort recomputes a task's duration when resources are assigned
+ *     (Duration = Work / Units), shrinking it.
+ *  2. Dependency creation recomputes a successor's start (predecessor finish +
+ *     lag), which can land off the imported start.
+ *
+ * This pass re-asserts each leaf task's original start AND duration via
+ * msdyn_PssUpdateV1, pinning them like a manual edit does in the UI. With start
+ * fixed and Work fixed, the engine recomputes Units rather than the dates,
+ * restoring the imported schedule. Duration is in working days derived from the
+ * imported start/finish dates.
+ *
+ * Must run AFTER tasks, assignments, and dependencies are written. Best-effort:
+ * a failed OperationSet leaves the engine-computed values in place but does not
+ * abort the import.
+ */
+export async function correctTaskSchedule(
+  tasks: PoTask[],
+  projectId: string,
+  taskIdMap: Record<string, string>,
+  calendar: ProjectCalendar,
+  onProgress?: (result: ScheduleCorrectionResult) => void,
+): Promise<ScheduleCorrectionResult[]> {
+  const results: ScheduleCorrectionResult[] = []
+
+  // Summary tasks have engine-rolled-up start and duration — they are not
+  // editable, and correcting their leaves fixes them automatically. The
+  // ProjectData OData feed exposes the TaskIsSummary boolean directly.
+  const correctable = tasks
+    .filter(task =>
+      !isProjectSummaryTask(task) &&
+      !task.TaskIsSummary &&
+      !task.TaskIsMilestone &&
+      !!taskIdMap[task.TaskId] &&
+      !!task.TaskStartDate &&
+      !!task.TaskFinishDate,
+    )
+    .map(task => ({ task, days: calendarWorkingDaysInclusive(task.TaskStartDate!, task.TaskFinishDate!, calendar) }))
+    .filter(entry => entry.days > 0)
+
+  for (const chunk of chunks(correctable, 180)) {
+    if (chunk.length === 0) continue
+
+    let opSetId: string | undefined
+    try {
+      opSetId = await createOperationSet(projectId, `Correct task schedule ${new Date().toISOString()}`)
+      for (const { task, days } of chunk) {
+        await queueScheduleUpdate(opSetId, {
+          '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_projecttask',
+          msdyn_projecttaskid: taskIdMap[task.TaskId],
+          msdyn_scheduledstart: task.TaskStartDate,
+          msdyn_start: task.TaskStartDate,
+          msdyn_duration: days,
+        })
+        debugSchedule(`task ${task.TaskId} correction`, {
+          intended_start: task.TaskStartDate,
+          intended_finish: task.TaskFinishDate,
+          calendar_days: days,
+        })
+      }
+      await executeOperationSet(opSetId)
+      for (const { task, days } of chunk) {
+        const result: ScheduleCorrectionResult = { poTaskId: task.TaskId, start: task.TaskStartDate!, durationDays: days, success: true }
+        results.push(result)
+        onProgress?.(result)
+      }
+    } catch (e) {
+      if (opSetId) await abandonOperationSet(opSetId)
+      console.warn(`[taskWriter] schedule correction batch failed (${chunk.length} task(s)): ${String(e).slice(0, 300)}`)
+      for (const { task, days } of chunk) {
+        const result: ScheduleCorrectionResult = {
+          poTaskId: task.TaskId,
+          start: task.TaskStartDate!,
+          durationDays: days,
+          success: false,
+          error: nowError('Task', task.TaskId, `Schedule correction failed: ${String(e)}`, undefined, undefined),
+        }
+        results.push(result)
+        onProgress?.(result)
+      }
+    }
   }
 
   return results
@@ -197,6 +300,7 @@ async function remapMaterializedTaskIds(
   projectId: string,
   tasks: PoTask[],
   results: TaskWriteResult[],
+  hoursPerDay: number,
 ): Promise<void> {
   const poTaskIds = new Set(tasks.map(task => task.TaskId))
   const projectResults = results.filter(result => result.success && result.dvTaskId && poTaskIds.has(result.poTaskId))
@@ -223,7 +327,7 @@ async function remapMaterializedTaskIds(
         String(row.msdyn_subject ?? '') === getTaskSubject(task) &&
         sameDate(row.msdyn_scheduledstart, task.TaskStartDate) &&
         sameDate(row.msdyn_scheduledend, task.TaskFinishDate) &&
-        sameDuration(row.msdyn_duration, getTaskDuration(task))
+        sameDuration(row.msdyn_duration, getTaskDurationDays(task, hoursPerDay))
     })
 
     const materializedId = cleanGuid(getRecordId(match ?? {}, 'msdyn_projecttaskid'))
@@ -298,8 +402,18 @@ function getTaskSubject(task: PoTask): string {
   return name || DEFAULT_TASK_NAME
 }
 
-function getTaskDuration(task: PoTask): number | undefined {
-  return task.TaskIsMilestone ? 0 : task.TaskDurationInMinutes
+/**
+ * Returns the task duration in *days* as PSS expects on `msdyn_duration`.
+ * Per MS docs (verified): msdyn_duration is "the duration in days for the task"
+ * (double). `msdyn_scheduleddurationminutes` is the read-only, PSS-computed
+ * minutes value — we never write it.
+ *
+ * Source is the task's duration in minutes (calendar minutes), converted to days
+ * via the project's working hours-per-day. Milestones are 0.
+ */
+function getTaskDurationDays(task: PoTask, hoursPerDay: number): number | undefined {
+  if (task.TaskIsMilestone) return 0
+  return taskDurationDays(task.TaskDurationInMinutes, hoursPerDay)
 }
 
 function getTaskEffort(task: PoTask): number | undefined {
@@ -365,6 +479,7 @@ async function clearSchedule(projectId: string): Promise<void> {
     `_msdyn_projectid_value eq ${projectId}`,
     5000,
   )
+  console.info(`[taskWriter] clearSchedule ${projectId}: deleting ${assignments.length} assignment(s)`)
   await deleteSchedulingRows(projectId, 'msdyn_resourceassignment', assignments, 'msdyn_resourceassignmentid')
 
   const dependencies = await listRecords(
@@ -373,6 +488,7 @@ async function clearSchedule(projectId: string): Promise<void> {
     `_msdyn_project_value eq ${projectId}`,
     5000,
   )
+  console.info(`[taskWriter] clearSchedule ${projectId}: deleting ${dependencies.length} dependenc(ies)`)
   await deleteSchedulingRows(projectId, 'msdyn_projecttaskdependency', dependencies, 'msdyn_projecttaskdependencyid')
 
   const tasks = await listRecords(
@@ -381,6 +497,7 @@ async function clearSchedule(projectId: string): Promise<void> {
     `_msdyn_project_value eq ${projectId}`,
     5000,
   )
+  console.info(`[taskWriter] clearSchedule ${projectId}: deleting ${tasks.length} task(s)`)
   const deepestFirst = [...tasks].sort((a, b) => Number(b.msdyn_outlinelevel ?? 0) - Number(a.msdyn_outlinelevel ?? 0))
   await deleteSchedulingRows(projectId, 'msdyn_projecttask', deepestFirst, 'msdyn_projecttaskid')
 }
@@ -408,8 +525,9 @@ function buildTaskEntity(
   taskId: string,
   projectId: string,
   bucketId: string,
+  hoursPerDay: number,
 ) {
-  return {
+  const entity = {
     '@odata.type': 'Microsoft.Dynamics.CRM.msdyn_projecttask',
     msdyn_projecttaskid: taskId,
     'msdyn_project@odata.bind': `/msdyn_projects(${projectId})`,
@@ -418,9 +536,18 @@ function buildTaskEntity(
     msdyn_scheduledstart: task.TaskStartDate,
     msdyn_scheduledend: task.TaskFinishDate,
     msdyn_start: task.TaskStartDate,
-    msdyn_duration: getTaskDuration(task),
+    msdyn_duration: getTaskDurationDays(task, hoursPerDay),
     ...(getTaskEffort(task) != null ? { msdyn_effort: getTaskEffort(task) } : {}),
     ...(getTaskProgress(task) != null ? { msdyn_progress: getTaskProgress(task) } : {}),
     ...(task.TaskOutlineLevel != null ? { msdyn_outlinelevel: task.TaskOutlineLevel } : {})
   }
+  debugSchedule(`task ${task.TaskId} payload`, {
+    msdyn_duration_days: entity.msdyn_duration,
+    msdyn_effort_minutes: getTaskEffort(task),
+    msdyn_scheduledstart: entity.msdyn_scheduledstart,
+    msdyn_scheduledend: entity.msdyn_scheduledend,
+    source_durationMinutes: task.TaskDurationInMinutes,
+    source_work: task.TaskWork,
+  })
+  return entity
 }

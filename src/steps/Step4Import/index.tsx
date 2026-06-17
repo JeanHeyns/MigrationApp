@@ -32,8 +32,9 @@ import { writeProjects } from '../../services/plannerPremium/projectWriter'
 import type { ProjectWriteResult } from '../../services/plannerPremium/projectWriter'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
-import { writeTasks } from '../../services/plannerPremium/taskWriter'
+import { writeTasks, correctTaskSchedule } from '../../services/plannerPremium/taskWriter'
 import type { TaskWriteResult } from '../../services/plannerPremium/taskWriter'
+import { readProjectCalendar, clearCalendarCache } from '../../services/plannerPremium/calendarReader'
 import { writeDependencies } from '../../services/plannerPremium/dependencyWriter'
 import type { DependencyWriteResult } from '../../services/plannerPremium/dependencyWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
@@ -191,8 +192,21 @@ export function Step4Import() {
   }, [running, importProgress])
 
   useEffect(() => {
-    rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    scrollToStepTop()
   }, [activeSection])
+
+  function scrollToStepTop() {
+    rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    window.requestAnimationFrame(() => {
+      rootRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      document.scrollingElement?.scrollTo({ top: 0, behavior: 'smooth' })
+    })
+  }
+
+  function goToSection(section: ImportSection) {
+    setActiveSection(section)
+    window.setTimeout(scrollToStepTop, 0)
+  }
 
   const selectedProjects = useMemo(
     () => fetchedData?.projects.filter(p => selectedProjectIds.has(p.ProjectId)) ?? [],
@@ -344,7 +358,7 @@ export function Step4Import() {
   }
 
   async function runImport() {
-    setActiveSection('import')
+    goToSection('import')
     setRunning(true)
     setFatalError(null)
     setLogLines([])
@@ -476,6 +490,7 @@ export function Step4Import() {
 
       // Phase 2: Per-project parallel (project + team members + tasks + deps + assignments)
       setPhase('Importing')
+      clearCalendarCache()
       const allProjectResults: ProjectWriteResult[] = []
       const allTeamResults: AssignmentWriteResult[] = []
       const allTaskResults: TaskWriteResult[] = []
@@ -492,6 +507,7 @@ export function Step4Import() {
           }
 
           const projectStart = Date.now()
+          try {
 
           const projectResults = await writeProjects([project], config, optionSetMappings, r => {
             setCompleted(c => c + 1)
@@ -523,6 +539,8 @@ export function Step4Import() {
           }
 
           const singleProjectMap = { [project.ProjectId]: dvProjectId }
+          const projectSettings = effectiveSettings(project.ProjectId, projectDefaults, projectOverrides)
+          const projectCalendar = await readProjectCalendar(dvProjectId, projectSettings.hoursPerDay)
 
           const projectAssignments = importAssignments.filter(a => a.ProjectId === project.ProjectId)
           const projectTeamMembers = effectiveTeamMembers.filter(tm => tm.ProjectId === project.ProjectId)
@@ -546,7 +564,7 @@ export function Step4Import() {
 
           if (migrationScope.tasks) {
             const projectTasks = importTasks.filter(t => t.ProjectId === project.ProjectId)
-            const taskResults = await writeTasks(projectTasks, singleProjectMap, config, optionSetMappings, r => {
+            const taskResults = await writeTasks(projectTasks, singleProjectMap, config, optionSetMappings, projectSettings.hoursPerDay, r => {
               setCompleted(c => c + 1)
               appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} task ${r.poTaskId}${r.error ? `: ${r.error.message}` : ''}`)
             })
@@ -562,7 +580,7 @@ export function Step4Import() {
                 const depResults = await writeDependencies(projectDeps, singleProjectMap, projectTaskIdMap, r => {
                   setCompleted(c => c + 1)
                   appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} dependency ${r.poDependencyId}${r.error ? `: ${r.error.message}` : ''}`)
-                })
+                }, { tasks: projectTasks, hoursPerDay: projectSettings.hoursPerDay ?? 8 })
                 allDepResults.push(...depResults)
               }
             }
@@ -570,18 +588,37 @@ export function Step4Import() {
             if (migrationScope.assignments) {
               if (projectAssignments.length > 0) {
                 const assignResults = await writeAssignments(
-                  projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, r => {
+                  projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, projectTasks, projectCalendar, r => {
                     setCompleted(c => c + 1)
                     appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} assignment ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
                   }
                 )
                 allAssignResults.push(...assignResults)
+
+                // Fixed Effort + dependency recalculation move dates after assignments.
+                // Re-assert each task's original start and duration so the engine
+                // restores the imported schedule (recomputing units instead).
+                const correctionResults = await correctTaskSchedule(
+                  projectTasks, dvProjectId, projectTaskIdMap, projectCalendar, r => {
+                    appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} schedule ${r.poTaskId} → ${r.start?.slice(0, 10)} ${r.durationDays}d${r.error ? `: ${r.error.message}` : ''}`)
+                  }
+                )
+                const correctionFailures = correctionResults.filter(r => !r.success).length
+                if (correctionFailures > 0) {
+                  appendLog(`[${project.ProjectName}] ${correctionFailures} duration correction(s) failed`)
+                }
               }
             }
           }
 
           completeProject(Date.now() - projectStart)
           appendLog(`[${project.ProjectName}] Complete`)
+
+          } catch (e) {
+            appendLog(`[${project.ProjectName}] FAILED: ${String(e)}`)
+            addLog({ level: 'error', message: `Project ${project.ProjectName} failed during import: ${String(e)}` })
+            completeProject(Date.now() - projectStart)
+          }
         },
         concurrency,
       )
@@ -689,20 +726,20 @@ export function Step4Import() {
         <Button
           appearance={activeSection === 'resources' ? 'primary' : 'secondary'}
           disabled={running}
-          onClick={() => setActiveSection('resources')}
+          onClick={() => goToSection('resources')}
         >
           1. Resources
         </Button>
         <Button
           appearance={activeSection === 'projects' ? 'primary' : 'secondary'}
           disabled={running}
-          onClick={() => setActiveSection('projects')}
+          onClick={() => goToSection('projects')}
         >
           2. Projects
         </Button>
         <Button
           appearance={activeSection === 'import' ? 'primary' : 'secondary'}
-          onClick={() => setActiveSection('import')}
+          onClick={() => goToSection('import')}
         >
           3. Import
         </Button>
@@ -923,12 +960,12 @@ export function Step4Import() {
         <Button onClick={prevStep} disabled={running}>Back</Button>
         <div className={styles.toolbar}>
           {activeSection === 'resources' && (
-            <Button appearance="primary" disabled={running || invalidResourceOptions} onClick={() => setActiveSection('projects')}>
+            <Button appearance="primary" disabled={running || invalidResourceOptions} onClick={() => goToSection('projects')}>
               Next: Projects
             </Button>
           )}
           {activeSection === 'projects' && (
-            <Button appearance="primary" disabled={running || selectedProjects.length === 0} onClick={() => setActiveSection('import')}>
+            <Button appearance="primary" disabled={running || selectedProjects.length === 0} onClick={() => goToSection('import')}>
               Next: Import
             </Button>
           )}

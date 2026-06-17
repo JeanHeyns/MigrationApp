@@ -1,9 +1,12 @@
-import type { PoAssignment, PoProjectTeamMember } from '../../models/projectOnline.types'
+import type { PoAssignment, PoProjectTeamMember, PoTask } from '../../models/projectOnline.types'
 import type { ImportError } from '../../models/plannerPremium.types'
 import { listRecords, performUnboundAction } from './dataverseClient'
 import { chunks, cleanGuid, getRecordId, nowError } from './importHelpers'
 import { classifyDataverseError } from './errorClassifier'
 import { executeOperationSetWithRetry } from './scheduleApi'
+import { buildAssignmentContour, serializePlannedWork, type ContourResult } from './assignmentContour'
+import type { ProjectCalendar } from './calendarReader'
+import { debugSchedule } from './scheduleDebug'
 
 export interface AssignmentWriteResult {
   poAssignmentId: string
@@ -87,9 +90,12 @@ export async function writeAssignments(
   projectIdMap: Record<string, string>,
   taskIdMap: Record<string, string>,
   teamMemberIdMap: Record<string, string>,
+  tasks: PoTask[],
+  calendar: ProjectCalendar,
   onProgress?: (result: AssignmentWriteResult) => void,
 ): Promise<AssignmentWriteResult[]> {
   const results: AssignmentWriteResult[] = []
+  const tasksById = new Map<string, PoTask>(tasks.map(t => [t.TaskId, t]))
   const assignmentsByProject = groupAssignmentsByProject(assignments)
 
   for (const [poProjectId, projectAssignments] of assignmentsByProject) {
@@ -176,6 +182,25 @@ export async function writeAssignments(
           teamMemberIdMap,
           resourceKeys.map(key => `${assignment.ProjectId}:${key}`),
         )
+
+        // Build the planned-work contour so PSS schedules the resource across the
+        // imported task dates (rather than re-deriving duration under Fixed Effort).
+        const task = tasksById.get(assignment.TaskId)
+        const contour: ContourResult = task ? buildAssignmentContour(task, assignment, calendar) : { slices: [] }
+        if (contour.warning) {
+          console.warn(`[assignmentWriter] ${sourceId}: ${contour.warning}`)
+        }
+        if (contour.slices.length > 0) {
+          debugSchedule(`assignment ${sourceId} contour`, {
+            taskId: assignment.TaskId,
+            units: assignment.AssignmentUnits,
+            slices: contour.slices.length,
+            totalHours: contour.slices.reduce((sum, s) => sum + s.Hours, 0),
+            firstSlice: contour.slices[0],
+            lastSlice: contour.slices[contour.slices.length - 1],
+          })
+        }
+
         return {
           id: sourceId,
           dvId: assignmentId,
@@ -186,6 +211,7 @@ export async function writeAssignments(
             'msdyn_projectid@odata.bind': `/msdyn_projects(${projectId})`,
             'msdyn_taskid@odata.bind': `/msdyn_projecttasks(${taskId})`,
             'msdyn_projectteamid@odata.bind': `/msdyn_projectteams(${teamMemberId})`,
+            ...(contour.slices.length > 0 ? { msdyn_plannedwork: serializePlannedWork(contour.slices) } : {}),
           } as Record<string, unknown>,
         }
       })
@@ -196,6 +222,34 @@ export async function writeAssignments(
         ops.map(op => ({ id: op.id, entity: op.entity })),
         `Project Online assignment import ${new Date().toISOString()}`,
       )
+
+      // msdyn_plannedwork may be rejected (field unwriteable on some tenants, or a
+      // contour the engine refuses). Retry failed ops once without the contour — a
+      // bare assignment beats no assignment, and correctTaskSchedule still re-pins dates.
+      const retryable = batchResult.failed.filter(f =>
+        f.errorClass !== 'AlreadyExists' &&
+        'msdyn_plannedwork' in f.op.entity
+      )
+      if (retryable.length > 0) {
+        console.warn(`[assignmentWriter] ${retryable.length} assignment op(s) failed with plannedwork set — retrying once without contour`)
+        const strippedOps = retryable.map(f => {
+          const entity = { ...f.op.entity }
+          delete entity['msdyn_plannedwork']
+          return { id: f.op.id, entity }
+        })
+        const retryResult = await executeOperationSetWithRetry(
+          projectId,
+          strippedOps,
+          `Project Online assignment import (no contour) ${new Date().toISOString()}`,
+        )
+        const retriedIds = new Set(strippedOps.map(o => o.id))
+        batchResult.failed = batchResult.failed.filter(f => !retriedIds.has(f.op.id))
+        batchResult.succeeded.push(...retryResult.succeeded)
+        batchResult.failed.push(...retryResult.failed)
+        if (retryResult.succeeded.length > 0) {
+          console.warn(`[assignmentWriter] ${retryResult.succeeded.length} assignment(s) created without contour — task dates rely on correctTaskSchedule`)
+        }
+      }
 
       for (const op of batchResult.succeeded) {
         const result: AssignmentWriteResult = {

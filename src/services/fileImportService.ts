@@ -398,7 +398,7 @@ function pushWarning(
 
 // ─── Main parser ──────────────────────────────────────────────────────────────
 
-export function parseWorkbook(file: File): Promise<LoaderResult> {
+export function parseWorkbook(file: File, hoursPerDay = 8): Promise<LoaderResult> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = (e) => {
@@ -412,7 +412,7 @@ export function parseWorkbook(file: File): Promise<LoaderResult> {
           return
         }
 
-        const { fetchedData, warnings: parseWarnings } = parseSheets(wb)
+        const { fetchedData, warnings: parseWarnings } = parseSheets(wb, hoursPerDay)
         resolve({
           fetchedData,
           warnings: [...structuralWarnings, ...parseWarnings],
@@ -441,9 +441,13 @@ function slugify(s: string): string {
   return s.replace(/\s+/g, '_').replace(/[^A-Za-z0-9_]/g, '')
 }
 
-function parseSheets(wb: XLSX.WorkBook): { fetchedData: PoFetchedData; warnings: LoaderWarning[] } {
+function parseSheets(wb: XLSX.WorkBook, hoursPerDay = 8): { fetchedData: PoFetchedData; warnings: LoaderWarning[] } {
   const warnings: LoaderWarning[] = []
   const capCounts = new Map<string, number>()
+  // Working hours per day used to convert the Excel DurationDays column into the
+  // minutes the writer expects. Configured in Step 1 (tenant calendar, e.g. 7.6) —
+  // previously hardcoded to 8, which over-stated every file-upload task duration.
+  const hpd = hoursPerDay > 0 ? hoursPerDay : 8
 
   // ── 1. CustomFields sheet ────────────────────────────────────────────────
   const cfRows = sheetToRows(wb, 'CustomFields')
@@ -754,7 +758,7 @@ function parseSheets(wb: XLSX.WorkBook): { fetchedData: PoFetchedData; warnings:
         TaskName:              name,
         TaskStartDate:         toISODate(r['StartDate'],  'Tasks', i + 2, 'StartDate',  warnings, capCounts),
         TaskFinishDate:        toISODate(r['FinishDate'], 'Tasks', i + 2, 'FinishDate', warnings, capCounts),
-        TaskDurationInMinutes: durationDays != null ? Math.round(durationDays * 8 * 60) : undefined,
+        TaskDurationInMinutes: durationDays != null ? Math.round(durationDays * hpd * 60) : undefined,
         TaskPercentCompleted:  num(r['PercentComplete']),
         TaskOutlineLevel:      num(r['OutlineLevel']),
         TaskOutlineNumber:     str(r['OutlineNumber'])  || undefined,

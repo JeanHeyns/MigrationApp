@@ -448,7 +448,7 @@ export function Step1Connect() {
       setFetchedData(null)
       setUploadParsing(true)
       try {
-        const parsed = await parseWorkbook(uploadedFile)
+        const parsed = await parseWorkbook(uploadedFile, projectDefaults.hoursPerDay)
         setUploadResult(parsed.fetchedData)
         setFetchedData(parsed.fetchedData)
         setFileUploadResult(parsed.warnings, uploadedFile.name)
