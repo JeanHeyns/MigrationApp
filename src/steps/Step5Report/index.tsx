@@ -489,11 +489,12 @@ export function Step5Report() {
     if (!fetchedData) return
     setExportingDiagnostic(true)
     try {
+      const scheduleModeLabels = new Map<number, string>(scheduleModeOptions.map(o => [o.value, o.label]))
       const settingsByProject = new Map<string, ProjectSettingsLite>()
       for (const p of fetchedData.projects) {
         const eff = effectiveSettings(p.ProjectId, projectDefaults, projectOverrides)
-        const scheduleModeLabel = scheduleModeOptions.find(o => o.value === eff.scheduleMode)?.label ?? null
-        settingsByProject.set(p.ProjectId, { hoursPerDay: eff.hoursPerDay, scheduleModeLabel })
+        const scheduleModeLabel = eff.scheduleMode != null ? scheduleModeLabels.get(eff.scheduleMode) ?? null : null
+        settingsByProject.set(p.ProjectId, { hoursPerDay: eff.hoursPerDay, scheduleMode: eff.scheduleMode, scheduleModeLabel })
       }
       const report = await buildScheduleDiagnostic({
         dataSource,
@@ -505,6 +506,7 @@ export function Step5Report() {
         assignments: fetchedData.assignments,
         resources: fetchedData.resources,
         settingsByProject,
+        scheduleModeLabels,
       })
       downloadJson(`schedule-diagnostic-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, report)
     } catch (err) {

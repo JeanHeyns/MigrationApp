@@ -6,6 +6,7 @@
 
 export interface ProjectSettingsLite {
   hoursPerDay: number
+  scheduleMode: number | null
   scheduleModeLabel: string | null
 }
 
@@ -22,6 +23,8 @@ export interface DiagnosticInput {
   resources: import('../../models/projectOnline.types').PoResource[]
   /** Effective working-time per PO project id. */
   settingsByProject: Map<string, ProjectSettingsLite>
+  /** Schedule-mode option value → label, for labelling the target mode. */
+  scheduleModeLabels: Map<number, string>
 }
 
 export interface ScheduleDiagnosticReport {
@@ -51,8 +54,9 @@ export interface ProjectDiagnostic {
   target: Record<string, unknown> | null
   delta: {
     startDays: number | null
-    endDays: number | null
+    finishDays: number | null
     hoursPerDayMatch: boolean | null
+    scheduleModeMatch: boolean | null
   }
   tasks: TaskDiagnostic[]
   assignments: AssignmentDiagnostic[]

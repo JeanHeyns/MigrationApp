@@ -117,7 +117,7 @@ async function buildProjectDiagnostic(
   isProjectOnline: boolean,
 ): Promise<ProjectDiagnostic> {
   const dvProjectId = cleanGuid(poProject.ProjectId)?.toLowerCase() ?? poProject.ProjectId
-  const settings = input.settingsByProject.get(poProject.ProjectId) ?? { hoursPerDay: 8, scheduleModeLabel: null }
+  const settings = input.settingsByProject.get(poProject.ProjectId) ?? { hoursPerDay: 8, scheduleMode: null, scheduleModeLabel: null }
 
   const source: ProjectDiagnostic['source'] = {
     projectId: poProject.ProjectId,
@@ -136,7 +136,7 @@ async function buildProjectDiagnostic(
     projectName: poProject.ProjectName,
     source,
     target: null,
-    delta: { startDays: null, endDays: null, hoursPerDayMatch: null },
+    delta: { startDays: null, finishDays: null, hoursPerDayMatch: null, scheduleModeMatch: null },
     tasks: [],
     assignments: [],
     resources: [],
@@ -144,12 +144,18 @@ async function buildProjectDiagnostic(
   }
 
   try {
-    diag.target = await fetchProject(dvProjectId)
-    if (diag.target) {
+    const projectRow = await fetchProject(dvProjectId)
+    if (projectRow) {
+      const targetMode = num(projectRow.msdyn_schedulemode)
+      const targetModeLabel = targetMode != null ? input.scheduleModeLabels.get(targetMode) ?? null : null
+      diag.target = { ...projectRow, msdyn_schedulemode_label: targetModeLabel }
       diag.delta = {
-        startDays: deltaDays(source.startDate, str(diag.target.msdyn_scheduledstart)),
-        endDays: deltaDays(source.finishDate, str(diag.target.msdyn_scheduledend)),
-        hoursPerDayMatch: num(diag.target.msdyn_hoursperday) === settings.hoursPerDay,
+        startDays: deltaDays(source.startDate, str(projectRow.msdyn_scheduledstart)),
+        finishDays: deltaDays(source.finishDate, str(projectRow.msdyn_finish)),
+        hoursPerDayMatch: num(projectRow.msdyn_hoursperday) === settings.hoursPerDay,
+        scheduleModeMatch: settings.scheduleMode != null && targetMode != null
+          ? settings.scheduleMode === targetMode
+          : null,
       }
     }
 
@@ -357,14 +363,21 @@ async function readCalendarHoursPerDay(calendarId: string): Promise<number | nul
 
 // ─── Dataverse fetch helpers ──────────────────────────────────────────────────
 
+// On msdyn_project the finish field is msdyn_finish (NOT msdyn_scheduledend — that
+// only exists on msdyn_projecttask). Try a rich select; fall back to a minimal
+// known-safe set if any optional field is rejected, so one bad field can't 400 the
+// whole fetch.
 async function fetchProject(dvProjectId: string): Promise<Record<string, unknown> | null> {
-  const rows = await listRecords(
-    'msdyn_projects',
-    'msdyn_projectid,msdyn_subject,msdyn_scheduledstart,msdyn_scheduledend,msdyn_hoursperday,msdyn_schedulemode,_msdyn_workhourtemplate_value',
-    `msdyn_projectid eq ${dvProjectId}`,
-    1,
-  )
-  return rows[0] ?? null
+  const filter = `msdyn_projectid eq ${dvProjectId}`
+  const rich = 'msdyn_projectid,msdyn_subject,msdyn_scheduledstart,msdyn_finish,msdyn_scheduleddurationminutes,msdyn_hoursperday,msdyn_schedulemode,msdyn_actualstart,msdyn_actualend,_msdyn_workhourtemplate_value'
+  const safe = 'msdyn_projectid,msdyn_subject,msdyn_scheduledstart,msdyn_finish,msdyn_hoursperday,msdyn_schedulemode'
+  try {
+    const rows = await listRecords('msdyn_projects', rich, filter, 1)
+    return rows[0] ?? null
+  } catch {
+    const rows = await listRecords('msdyn_projects', safe, filter, 1)
+    return rows[0] ?? null
+  }
 }
 
 async function fetchTasksForProject(dvProjectId: string): Promise<Record<string, unknown>[]> {
