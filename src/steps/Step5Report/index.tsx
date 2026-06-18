@@ -11,6 +11,10 @@ import { LoaderFeedbackPanel } from '../../components/LoaderFeedbackPanel'
 import type { AssociationAttempt, ImportError } from '../../models/plannerPremium.types'
 import type { LoaderWarning } from '../../services/fileUpload/types'
 import type { SchemaCreationResults, SkippedFieldInstance } from '../../models/dataOnly.types'
+import { buildScheduleDiagnostic } from '../../services/diagnostics/scheduleDiagnostic'
+import type { ProjectSettingsLite } from '../../services/diagnostics/types'
+import { effectiveSettings } from '../../utils/effectiveProjectSettings'
+import { getDataverseOrgUrl } from '../../config/environment'
 
 const useStyles = makeStyles({
   root: {
@@ -91,6 +95,16 @@ function csvEscape(value: unknown): string {
 function downloadCsv(filename: string, rows: string[][]) {
   const csv = rows.map(row => row.map(csvEscape).join(',')).join('\n')
   const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function downloadJson(filename: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -466,7 +480,39 @@ export function Step5Report() {
     schemaCreationResults, resetState, associationDiagnostics,
     selectedProjectIds, fetchedData, setSelectedProjectIds,
     dataSource, fileUploadWarnings, fileUploadFileName,
+    projectDefaults, projectOverrides, scheduleModeOptions, addLog,
   } = useMigration()
+
+  const [exportingDiagnostic, setExportingDiagnostic] = useState(false)
+
+  async function handleExportDiagnostic() {
+    if (!fetchedData) return
+    setExportingDiagnostic(true)
+    try {
+      const settingsByProject = new Map<string, ProjectSettingsLite>()
+      for (const p of fetchedData.projects) {
+        const eff = effectiveSettings(p.ProjectId, projectDefaults, projectOverrides)
+        const scheduleModeLabel = scheduleModeOptions.find(o => o.value === eff.scheduleMode)?.label ?? null
+        settingsByProject.set(p.ProjectId, { hoursPerDay: eff.hoursPerDay, scheduleModeLabel })
+      }
+      const report = await buildScheduleDiagnostic({
+        dataSource,
+        migrationMode,
+        tenantUrl: getDataverseOrgUrl(),
+        selectedProjectIds,
+        projects: fetchedData.projects,
+        tasks: fetchedData.tasks,
+        assignments: fetchedData.assignments,
+        resources: fetchedData.resources,
+        settingsByProject,
+      })
+      downloadJson(`schedule-diagnostic-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, report)
+    } catch (err) {
+      addLog({ level: 'error', message: `Schedule diagnostic export failed: ${String(err)}` })
+    } finally {
+      setExportingDiagnostic(false)
+    }
+  }
 
   const totalRecords = importResults.reduce((s, r) => s + r.total, 0)
   const totalSucceeded = importResults.reduce((s, r) => s + r.succeeded, 0)
@@ -659,7 +705,16 @@ export function Step5Report() {
       <div className={styles.panel}>
         <div className={styles.toolbar} style={{ justifyContent: 'space-between', marginBottom: '10px' }}>
           <div className={styles.sectionTitle}>Entity Results</div>
-          <Button size="small" onClick={exportSummary} disabled={importResults.length === 0}>Export summary CSV</Button>
+          <div className={styles.toolbar}>
+            <Button size="small" onClick={exportSummary} disabled={importResults.length === 0}>Export summary CSV</Button>
+            <Button
+              size="small"
+              onClick={handleExportDiagnostic}
+              disabled={importResults.length === 0 || !fetchedData || exportingDiagnostic}
+            >
+              {exportingDiagnostic ? 'Building diagnostic…' : 'Export schedule diagnostics (JSON)'}
+            </Button>
+          </div>
         </div>
         <table className={styles.table}>
           <thead>
