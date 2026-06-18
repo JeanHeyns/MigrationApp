@@ -588,7 +588,7 @@ export function Step4Import() {
             if (migrationScope.assignments) {
               if (projectAssignments.length > 0) {
                 const assignResults = await writeAssignments(
-                  projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, projectTasks, projectCalendar, r => {
+                  projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, r => {
                     setCompleted(c => c + 1)
                     appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} assignment ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
                   }

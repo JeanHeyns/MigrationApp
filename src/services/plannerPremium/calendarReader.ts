@@ -57,18 +57,20 @@ export async function readProjectCalendar(projectId: string, hoursPerDay: number
  * Returns an empty set (not an error) when the calendar or its rules are absent.
  */
 async function readHolidays(projectId: string): Promise<Set<string>> {
+  // Project's calendar lookup is "CalendarID" → annotation _msdyn_calendarid_value.
+  // (An earlier guess of _msdyn_calendar_value 400s — that field does not exist on
+  // msdyn_project. The exact rule schema is still a dev-tenant verification point;
+  // any failure here is caught by the caller and falls back to Mon–Fri/no-holiday.)
   const projectRows = await listRecords(
     'msdyn_projects',
-    'msdyn_projectid,_msdyn_calendar_value,_msdyn_calendarid_value',
+    'msdyn_projectid,_msdyn_calendarid_value',
     `msdyn_projectid eq ${projectId}`,
     1,
   )
   const project = projectRows[0]
   if (!project) return new Set()
 
-  const calendarId = cleanGuid(
-    String(project['_msdyn_calendar_value'] ?? project['_msdyn_calendarid_value'] ?? ''),
-  )
+  const calendarId = cleanGuid(String(project['_msdyn_calendarid_value'] ?? ''))
   if (!calendarId) return new Set()
 
   // msdyn_isnonworking flags exception (non-working) rules such as holidays.
