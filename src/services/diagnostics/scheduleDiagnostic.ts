@@ -147,7 +147,9 @@ async function buildProjectDiagnostic(
     const projectRow = await fetchProject(dvProjectId)
     if (projectRow) {
       const targetMode = num(projectRow.msdyn_schedulemode)
-      const targetModeLabel = targetMode != null ? input.scheduleModeLabels.get(targetMode) ?? null : null
+      const targetModeLabel = targetMode != null
+        ? input.scheduleModeLabels.get(targetMode) ?? `unknown (${targetMode})`
+        : null
       diag.target = { ...projectRow, msdyn_schedulemode_label: targetModeLabel }
       diag.delta = {
         startDays: deltaDays(source.startDate, str(projectRow.msdyn_scheduledstart)),
@@ -189,18 +191,10 @@ function buildTaskDiagnostic(
     ? calendarWorkingDaysInclusive(poTask.TaskStartDate, poTask.TaskFinishDate, MON_FRI)
     : null
   const durationMinutesSource = num(poTask.TaskDurationInMinutes)
-
-  const target = matched
-    ? {
-        msdyn_scheduledstart: str(matched.msdyn_scheduledstart),
-        msdyn_scheduledend: str(matched.msdyn_scheduledend),
-        msdyn_duration: num(matched.msdyn_duration),
-        msdyn_scheduleddurationminutes: num(matched.msdyn_scheduleddurationminutes),
-        msdyn_effort: num(matched.msdyn_effort),
-      }
-    : null
-
   const sourceDurMinutes = durationMinutesSource ?? (durationDays != null ? Math.round(durationDays * hoursPerDay * 60) : null)
+
+  const tDuration = matched ? num(matched.msdyn_duration) : null
+  const tSchedMinutes = matched ? num(matched.msdyn_scheduleddurationminutes) : null
 
   return {
     taskId_source: poTask.TaskId,
@@ -215,16 +209,16 @@ function buildTaskDiagnostic(
       durationMinutes_source: durationMinutesSource,
       ...(isProjectOnline ? { work_hours: num(poTask.TaskWork) } : {}),
     },
-    target,
-    delta: target
+    target: matched ? { ...matched } : null,
+    delta: matched
       ? {
-          startDays: deltaDays(toDateOnly(poTask.TaskStartDate), target.msdyn_scheduledstart),
-          endDays: deltaDays(toDateOnly(poTask.TaskFinishDate), target.msdyn_scheduledend),
-          durationDaysDelta: target.msdyn_duration != null && durationDays != null
-            ? Math.round((target.msdyn_duration - durationDays) * 100) / 100
+          startDays: deltaDays(toDateOnly(poTask.TaskStartDate), str(matched.msdyn_scheduledstart)),
+          endDays: deltaDays(toDateOnly(poTask.TaskFinishDate), str(matched.msdyn_scheduledend)),
+          durationDaysDelta: tDuration != null && durationDays != null
+            ? Math.round((tDuration - durationDays) * 100) / 100
             : null,
-          scheduledDurationMinutesDelta: target.msdyn_scheduleddurationminutes != null && sourceDurMinutes != null
-            ? target.msdyn_scheduleddurationminutes - sourceDurMinutes
+          scheduledDurationMinutesDelta: tSchedMinutes != null && sourceDurMinutes != null
+            ? tSchedMinutes - sourceDurMinutes
             : null,
         }
       : null,
@@ -253,10 +247,9 @@ async function buildAssignmentsAndResources(
       resourceName,
       source: { units: null },
       target: {
-        msdyn_plannedwork: planned ? planned.slice(0, 200) : null,
+        ...row,
         msdyn_plannedwork_sliceCount: pw.sliceCount,
         msdyn_plannedwork_totalHours: pw.totalHours,
-        msdyn_effort: num(row.msdyn_effort),
         ...(planned ? {} : { note: 'no contour written' }),
       },
     }
@@ -289,8 +282,8 @@ async function buildAssignmentsAndResources(
 
 async function buildResourceDiagnostic(bookableResourceId: string, projectHoursPerDay: number): Promise<ResourceDiagnostic> {
   try {
-    const rows = await listRecords('bookableresources', 'bookableresourceid,name,_calendarid_value', `bookableresourceid eq ${bookableResourceId}`, 1)
-    const row = rows[0]
+    const rows = await listRecords('bookableresources', undefined, `bookableresourceid eq ${bookableResourceId}`, 1)
+    const row = rows[0] ?? null
     const resourceName = row ? str(row.name) : null
     const calendarId = row ? str(row._calendarid_value) : null
 
@@ -298,6 +291,7 @@ async function buildResourceDiagnostic(bookableResourceId: string, projectHoursP
       return {
         resourceName,
         bookableresourceId: bookableResourceId,
+        raw: row,
         calendar: {
           calendarId: null,
           hasCalendar: false,
@@ -313,6 +307,7 @@ async function buildResourceDiagnostic(bookableResourceId: string, projectHoursP
     return {
       resourceName,
       bookableresourceId: bookableResourceId,
+      raw: row,
       calendar: {
         calendarId,
         hasCalendar: true,
@@ -329,6 +324,7 @@ async function buildResourceDiagnostic(bookableResourceId: string, projectHoursP
     return {
       resourceName: null,
       bookableresourceId: bookableResourceId,
+      raw: null,
       calendar: {
         calendarId: null,
         hasCalendar: false,
@@ -363,46 +359,23 @@ async function readCalendarHoursPerDay(calendarId: string): Promise<number | nul
 
 // ─── Dataverse fetch helpers ──────────────────────────────────────────────────
 
-// On msdyn_project the finish field is msdyn_finish (NOT msdyn_scheduledend — that
-// only exists on msdyn_projecttask). Try a rich select; fall back to a minimal
-// known-safe set if any optional field is rejected, so one bad field can't 400 the
-// whole fetch.
+// All diagnostic fetches drop $select on purpose: we are diagnosing, so we want the
+// full row. Guessing field names against unreliable docs caused an iterative 400
+// fail-cycle (msdyn_scheduledend, then msdyn_scheduleddurationminutes on the project).
+// Performance is irrelevant for ≤50 projects.
 async function fetchProject(dvProjectId: string): Promise<Record<string, unknown> | null> {
-  const filter = `msdyn_projectid eq ${dvProjectId}`
-  const rich = 'msdyn_projectid,msdyn_subject,msdyn_scheduledstart,msdyn_finish,msdyn_scheduleddurationminutes,msdyn_hoursperday,msdyn_schedulemode,msdyn_actualstart,msdyn_actualend,_msdyn_workhourtemplate_value'
-  const safe = 'msdyn_projectid,msdyn_subject,msdyn_scheduledstart,msdyn_finish,msdyn_hoursperday,msdyn_schedulemode'
-  try {
-    const rows = await listRecords('msdyn_projects', rich, filter, 1)
-    return rows[0] ?? null
-  } catch {
-    const rows = await listRecords('msdyn_projects', safe, filter, 1)
-    return rows[0] ?? null
-  }
+  const rows = await listRecords('msdyn_projects', undefined, `msdyn_projectid eq ${dvProjectId}`, 1)
+  return rows[0] ?? null
 }
 
 async function fetchTasksForProject(dvProjectId: string): Promise<Record<string, unknown>[]> {
-  return listRecords(
-    'msdyn_projecttasks',
-    'msdyn_projecttaskid,msdyn_subject,msdyn_scheduledstart,msdyn_scheduledend,msdyn_duration,msdyn_scheduleddurationminutes,msdyn_effort,msdyn_outlinelevel',
-    `_msdyn_project_value eq ${dvProjectId}`,
-    5000,
-  )
+  return listRecords('msdyn_projecttasks', undefined, `_msdyn_project_value eq ${dvProjectId}`, 5000)
 }
 
 async function fetchAssignmentsForProject(dvProjectId: string): Promise<Record<string, unknown>[]> {
-  return listRecords(
-    'msdyn_resourceassignments',
-    'msdyn_resourceassignmentid,_msdyn_taskid_value,_msdyn_projectteamid_value,msdyn_plannedwork,msdyn_effort',
-    `_msdyn_projectid_value eq ${dvProjectId}`,
-    5000,
-  )
+  return listRecords('msdyn_resourceassignments', undefined, `_msdyn_projectid_value eq ${dvProjectId}`, 5000)
 }
 
 async function fetchProjectTeams(dvProjectId: string): Promise<Record<string, unknown>[]> {
-  return listRecords(
-    'msdyn_projectteams',
-    'msdyn_projectteamid,msdyn_name,_msdyn_bookableresourceid_value',
-    `_msdyn_project_value eq ${dvProjectId}`,
-    5000,
-  )
+  return listRecords('msdyn_projectteams', undefined, `_msdyn_project_value eq ${dvProjectId}`, 5000)
 }

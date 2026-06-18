@@ -78,13 +78,8 @@ export interface TaskDiagnostic {
     durationMinutes_source: number | null
     work_hours?: number | null
   }
-  target: {
-    msdyn_scheduledstart: string | null
-    msdyn_scheduledend: string | null
-    msdyn_duration: number | null
-    msdyn_scheduleddurationminutes: number | null
-    msdyn_effort: number | null
-  } | null
+  /** Full Dataverse msdyn_projecttask row (no $select), or null when unmatched. */
+  target: Record<string, unknown> | null
   delta: {
     startDays: number | null
     endDays: number | null
@@ -101,18 +96,19 @@ export interface AssignmentDiagnostic {
   source: {
     units: number | null
   }
-  target: {
-    msdyn_plannedwork: string | null
+  /** Full Dataverse msdyn_resourceassignment row (no $select) plus computed contour fields. */
+  target: (Record<string, unknown> & {
     msdyn_plannedwork_sliceCount: number | null
     msdyn_plannedwork_totalHours: number | null
-    msdyn_effort: number | null
     note?: string
-  } | null
+  }) | null
 }
 
 export interface ResourceDiagnostic {
   resourceName: string | null
   bookableresourceId: string
+  /** Full Dataverse bookableresource row (no $select). */
+  raw: Record<string, unknown> | null
   calendar: {
     calendarId: string | null
     hasCalendar: boolean
