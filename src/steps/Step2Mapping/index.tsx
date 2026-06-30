@@ -632,9 +632,11 @@ export function Step2Mapping() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [multiLookupMappingsState])
 
-  // Initialise mappings from fetched data (or restore from context).
-  // In dataOnly mode, re-init when schemaSnapshot becomes available.
-  // mappingConfig intentionally excluded — loadJson handler sets it directly.
+  // Initialise mappings from fetched data, or restore from context (mappingConfig).
+  // mappingConfig is the source of truth once set (by handleNext or handleLoadJson),
+  // so a schemaSnapshot change (rescan) restores it instead of clobbering edits with
+  // auto-detection. mappingConfig is excluded from deps on purpose — it is read, not
+  // reacted to; setting it must not retrigger a rebuild.
   useEffect(() => {
     if (!fetchedData) return
     if (mappingConfig) {
@@ -1030,6 +1032,11 @@ export function Step2Mapping() {
         setMultiLookupMappingsState(config.multiLookups ?? [])
         const loadedMode = config.migrationMode ?? 'full'
         setMigrationMode(loadedMode)
+        // Persist as the source of truth. The init effect re-derives mappings on every
+        // schemaSnapshot change (e.g. a rescan, which a dataOnly load always needs since
+        // the snapshot is not part of the JSON). Without this, that rescan rebuilds the
+        // mapping from auto-detection and silently discards the loaded config.
+        setMappingConfig(config)
         if (loadedMode === 'dataOnly' && !schemaSnapshot) {
           setLoadWarning('Loaded a data-only mapping — go back to Step 1, select a solution and run the schema scan before proceeding.')
         } else {
