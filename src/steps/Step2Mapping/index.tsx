@@ -986,6 +986,17 @@ export function Step2Mapping() {
         )}
       </div>
 
+      {/* ── dataOnly snapshot-missing banner ── */}
+      {migrationMode === 'dataOnly' && !schemaSnapshot && (
+        <MessageBar intent="error" style={{ marginBottom: '8px' }}>
+          <MessageBarBody>
+            No schema scan loaded for this environment. Every field below will show as
+            unmapped until you go back to Step 1 and run the schema scan. Uploading a file
+            or switching source clears the previous scan, so re-scan after doing either.
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
       {/* ── Toolbar ── */}
       <div className={styles.toolbar}>
         <Button size="small" onClick={handleRedetectTypes}>
@@ -1221,7 +1232,16 @@ export function Step2Mapping() {
                       ? (() => {
                           const dvEntityKey = PO_ENTITY_TO_DV[m.customField.CustomFieldEntityType]
                           const dvEntity = dvEntityKey ? schemaSnapshot?.entities[dvEntityKey] : undefined
-                          const compatible = dvEntity ? getCompatibleColumns(dvEntity, m.customField.CustomFieldType) : []
+                          if (!schemaSnapshot || !dvEntity || dvEntity.attributes.length === 0) {
+                            // Missing/empty snapshot ≠ missing column — don't tell the user to switch
+                            // to Full mode when the real cause is that the scan found no columns on
+                            // this entity (wrong env/solution, or scan not re-run after a file upload).
+                            const what = !schemaSnapshot
+                              ? 'Schema not scanned for this environment'
+                              : `Scan found no custom columns on ${dvEntityKey ?? 'this entity'}`
+                            return <span style={{ fontSize: '12px', color: '#a4262c' }}>{what} — go to Step 1 and run the schema scan (re-scan after uploading a file or switching source).</span>
+                          }
+                          const compatible = getCompatibleColumns(dvEntity, m.customField.CustomFieldType)
                           if (compatible.length === 0) {
                             const hint = isLookupMulti
                               ? 'No MultiSelectPicklist column found. Run schemaOnly first, or switch Migrate as to N:N.'

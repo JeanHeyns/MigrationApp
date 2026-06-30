@@ -1,5 +1,6 @@
 import type { FieldMapping, MultiLookupMapping } from '../../models/mapping.types'
 import type { FieldResolver } from './resolverFactory'
+import { toDateOnly } from './importHelpers'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -117,7 +118,7 @@ export function applyResolvers(
     if (!resolver) {
       // No resolver registered → direct pass-through for non-special types
       if (poValue != null && poValue !== '') {
-        payload[dvField] = poValue
+        payload[dvField] = mapping.targetColumnType === 'Date' ? toDateOnly(poValue) : poValue
       }
       continue
     }
@@ -133,7 +134,7 @@ export function applyResolvers(
         if (result.bindKey && result.bindValue) {
           payload[result.bindKey] = result.bindValue
         } else {
-          payload[dvField] = result.value
+          payload[dvField] = mapping.targetColumnType === 'Date' ? toDateOnly(result.value) : result.value
         }
         break
 

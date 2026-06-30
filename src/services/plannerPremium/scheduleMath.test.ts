@@ -5,6 +5,7 @@ import {
   isWorkingDay,
   listWorkingDays,
   taskDurationDays,
+  workValueToHours,
   type ProjectCalendar,
 } from './scheduleMath'
 
@@ -93,5 +94,15 @@ describe('taskDurationDays', () => {
   it('rounds to two decimals', () => {
     // 3 hours at 7.6 h/day = 0.3947… → 0.39
     expect(taskDurationDays(180, 7.6)).toBe(0.39)
+  })
+})
+
+describe('workValueToHours', () => {
+  it('keeps numeric work values as hours', () => {
+    expect(workValueToHours(52)).toBe(52)
+  })
+
+  it('converts ISO duration work to hours', () => {
+    expect(workValueToHours('PT52H30M')).toBe(52.5)
   })
 })

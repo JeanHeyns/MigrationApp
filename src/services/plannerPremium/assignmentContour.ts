@@ -1,6 +1,6 @@
 import type { PoAssignment, PoTask } from '../../models/projectOnline.types'
 import type { ProjectCalendar } from './scheduleMath'
-import { listWorkingDays } from './scheduleMath'
+import { listWorkingDays, workValueToHours } from './scheduleMath'
 
 /**
  * One day-slice of a resource assignment's planned-work contour.
@@ -17,6 +17,17 @@ export interface ContourSlice {
 export interface ContourResult {
   slices: ContourSlice[]
   /** Non-fatal note surfaced to the import log (e.g. units capped). */
+  warning?: string
+}
+
+export interface UpdatedContour {
+  start: string
+  end: string
+  minutes: number
+}
+
+export interface UpdatedContourResult {
+  contours: UpdatedContour[]
   warning?: string
 }
 
@@ -52,6 +63,17 @@ function format(d: Date): string {
   const mo = String(d.getMonth() + 1).padStart(2, '0')
   const da = String(d.getDate()).padStart(2, '0')
   return `${y}-${mo}-${da}`
+}
+
+function nextDateOnly(value: string): string | undefined {
+  const date = parseISO(value)
+  if (!date) return undefined
+  date.setDate(date.getDate() + 1)
+  return format(date)
+}
+
+function toIsoMidnight(dateOnly: string): string {
+  return `${dateOnly.slice(0, 10)}T00:00:00Z`
 }
 
 /**
@@ -106,4 +128,61 @@ export function buildAssignmentContour(
 
 export function serializePlannedWork(contour: ContourSlice[]): string {
   return JSON.stringify(contour)
+}
+
+/**
+ * Builds the payload for msdyn_PssUpdateResourceAssignmentContourV1.
+ *
+ * The update API does not use the stored `/Date(ms)/` + `Hours` shape. It expects
+ * ISO date ranges with a total minute quantity. We prefer the Project Online
+ * assignment's own start/finish/work values. When assignment dates are absent,
+ * the task window is used so PSS can derive Units while preserving the imported
+ * dates and duration.
+ */
+export function buildAssignmentContourUpdates(
+  task: PoTask,
+  assignment: PoAssignment,
+  calendar: ProjectCalendar,
+): UpdatedContourResult {
+  if (task.TaskIsMilestone) return { contours: [] }
+
+  const rawUnits = assignment.AssignmentUnits ?? 100
+  let warning: string | undefined
+  if (rawUnits > 100) {
+    warning = `assignment units ${rawUnits} capped to 100`
+  } else if (rawUnits <= 0) {
+    warning = `assignment units ${rawUnits} <= 0`
+  }
+
+  const start = assignment.AssignmentStartDate ?? task.TaskStartDate
+  if (!start) return { contours: [], warning: `task ${task.TaskId} has no start date - no contour written` }
+
+  const parsedHours = workValueToHours(assignment.AssignmentWork ?? assignment.AssignmentRemainingWork)
+  const sourceHours = parsedHours ?? 0
+  let finish = assignment.AssignmentFinishDate ?? task.TaskFinishDate ?? start
+
+  if (sourceHours < 0) {
+    return { contours: [], warning: `assignment ${assignment.AssignmentId ?? assignment.TaskId} has negative source work` }
+  }
+
+  const workingDays = listWorkingDays(start, finish, calendar)
+  if (workingDays.length === 0) return { contours: [], warning: `assignment ${assignment.AssignmentId ?? assignment.TaskId} has no working days - no contour written` }
+
+  const totalHours = sourceHours
+  const minutes = Math.round(totalHours * 60)
+  const end = nextDateOnly(finish)
+  if (!end || minutes < 0) return { contours: [], warning }
+
+  return {
+    contours: [{
+      start: toIsoMidnight(start),
+      end: toIsoMidnight(end),
+      minutes,
+    }],
+    warning,
+  }
+}
+
+export function serializeUpdatedContours(contours: UpdatedContour[]): string {
+  return JSON.stringify(contours)
 }

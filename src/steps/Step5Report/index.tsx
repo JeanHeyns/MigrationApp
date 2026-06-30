@@ -12,9 +12,13 @@ import type { AssociationAttempt, ImportError } from '../../models/plannerPremiu
 import type { LoaderWarning } from '../../services/fileUpload/types'
 import type { SchemaCreationResults, SkippedFieldInstance } from '../../models/dataOnly.types'
 import { buildScheduleDiagnostic } from '../../services/diagnostics/scheduleDiagnostic'
+import { buildDependencyUnknownsDiagnostic } from '../../services/diagnostics/dependencyUnknownsDiagnostic'
 import type { ProjectSettingsLite } from '../../services/diagnostics/types'
 import { effectiveSettings } from '../../utils/effectiveProjectSettings'
 import { getDataverseOrgUrl } from '../../config/environment'
+import { fetchTasksForProjects } from '../../services/projectOnline/tasks'
+import { fetchDependencies } from '../../services/projectOnline/dependencies'
+import { fetchAssignmentsForProjects } from '../../services/projectOnline/assignments'
 
 const useStyles = makeStyles({
   root: {
@@ -479,11 +483,37 @@ export function Step5Report() {
     migrationMode, skippedFieldInstances, selectedSolution,
     schemaCreationResults, resetState, associationDiagnostics,
     selectedProjectIds, fetchedData, setSelectedProjectIds,
-    dataSource, fileUploadWarnings, fileUploadFileName,
+    dataSource, pwaUrl, fileUploadWarnings, fileUploadFileName,
     projectDefaults, projectOverrides, scheduleModeOptions, addLog,
   } = useMigration()
 
   const [exportingDiagnostic, setExportingDiagnostic] = useState(false)
+  const [exportingUnknowns, setExportingUnknowns] = useState(false)
+
+  // One-shot debug tool — see docs/diagnostics/dependency-migration-audit.md.
+  // TODO: prompt for project id instead of hard-coding the reference project.
+  async function handleExportDependencyUnknowns() {
+    setExportingUnknowns(true)
+    try {
+      const DV_PROJECT_ID = '878099e9-3053-49b6-a2de-4f8d3cf588fb'
+      const poProject = fetchedData?.projects.find(
+        p =>
+          p.ProjectId.replace(/[{}]/g, '').toLowerCase() === DV_PROJECT_ID ||
+          (p.ProjectName ?? '').trim().toLowerCase() === 'ads',
+      )
+      const report = await buildDependencyUnknownsDiagnostic({
+        dvProjectId: DV_PROJECT_ID,
+        pwaUrl: fetchedData?.pwaUrl || pwaUrl,
+        poProjectId: poProject?.ProjectId,
+        projectName: poProject?.ProjectName,
+      })
+      downloadJson(`dependency-unknowns-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, report)
+    } catch (err) {
+      addLog({ level: 'error', message: `Dependency unknowns export failed: ${String(err)}` })
+    } finally {
+      setExportingUnknowns(false)
+    }
+  }
 
   async function handleExportDiagnostic() {
     if (!fetchedData) return
@@ -496,14 +526,34 @@ export function Step5Report() {
         const scheduleModeLabel = eff.scheduleMode != null ? scheduleModeLabels.get(eff.scheduleMode) ?? null : null
         settingsByProject.set(p.ProjectId, { hoursPerDay: eff.hoursPerDay, scheduleMode: eff.scheduleMode, scheduleModeLabel })
       }
+      const diagnosticProjects = selectedProjectIds.size > 0
+        ? fetchedData.projects.filter(p => selectedProjectIds.has(p.ProjectId))
+        : fetchedData.projects
+      let diagnosticTasks = fetchedData.tasks
+      let diagnosticDependencies = fetchedData.dependencies
+      let diagnosticAssignments = fetchedData.assignments
+
+      if (dataSource === 'ProjectOnline' && diagnosticProjects.length > 0 && (diagnosticTasks.length === 0 || diagnosticDependencies.length === 0 || diagnosticAssignments.length === 0)) {
+        const siteUrl = fetchedData.pwaUrl || pwaUrl
+        const [tasks, dependencies, assignments] = await Promise.all([
+          diagnosticTasks.length === 0 ? fetchTasksForProjects(siteUrl, diagnosticProjects) : Promise.resolve(diagnosticTasks),
+          diagnosticDependencies.length === 0 ? fetchDependencies(siteUrl, diagnosticProjects) : Promise.resolve(diagnosticDependencies),
+          diagnosticAssignments.length === 0 ? fetchAssignmentsForProjects(siteUrl, diagnosticProjects) : Promise.resolve(diagnosticAssignments),
+        ])
+        diagnosticTasks = tasks
+        diagnosticDependencies = dependencies
+        diagnosticAssignments = assignments
+      }
+
       const report = await buildScheduleDiagnostic({
         dataSource,
         migrationMode,
         tenantUrl: getDataverseOrgUrl(),
         selectedProjectIds,
         projects: fetchedData.projects,
-        tasks: fetchedData.tasks,
-        assignments: fetchedData.assignments,
+        tasks: diagnosticTasks,
+        dependencies: diagnosticDependencies,
+        assignments: diagnosticAssignments,
         resources: fetchedData.resources,
         settingsByProject,
         scheduleModeLabels,
@@ -715,6 +765,13 @@ export function Step5Report() {
               disabled={importResults.length === 0 || !fetchedData || exportingDiagnostic}
             >
               {exportingDiagnostic ? 'Building diagnostic…' : 'Export schedule diagnostics (JSON)'}
+            </Button>
+            <Button
+              size="small"
+              onClick={handleExportDependencyUnknowns}
+              disabled={exportingUnknowns}
+            >
+              {exportingUnknowns ? 'Building audit…' : 'Export dependency-unknowns audit'}
             </Button>
           </div>
         </div>

@@ -373,6 +373,18 @@ export function Step1Connect() {
     setResolverPlan(null)
     try {
       const snapshot = await inspectSolution(selectedSolution.solutionid)
+      const columnCount = Object.values(snapshot.entities)
+        .reduce((sum, e) => sum + e.attributes.length, 0)
+      if (columnCount === 0) {
+        // A truthy-but-empty snapshot used to pass canProceed and then mis-render in
+        // Step 2 as "No compatible column" on every field. Fail loudly instead.
+        setScanError(
+          'Schema scan found no custom columns on msdyn_project / msdyn_projecttask / msdyn_projectteam in this environment. ' +
+          'Data-only mode needs the target columns to already exist — verify the correct environment/solution is selected, or switch to Full mode in Step 1.',
+        )
+        setScanPhase('error')
+        return
+      }
       setSchemaSnapshot(snapshot)
       setScanPhase('done')
       setModeNotice(null)

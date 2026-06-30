@@ -51,15 +51,35 @@ async function fetchProjectTaskLinks(siteUrl: string, project: PoProject): Promi
 function normalizeDependency(projectId: string, row: Record<string, unknown>, index: number): PoTaskDependency {
   const predecessor = objectValue(row.Start) ?? objectValue(row.start)
   const successor = objectValue(row.End) ?? objectValue(row.end)
-  const dependencyTypeValue = numberValue(row.DependencyType ?? row.dependencyType)
+  const dependencyType = dependencyTypeValue(
+    firstDefined(
+      row.DependencyType,
+      row.dependencyType,
+      row.LinkType,
+      row.linkType,
+      row.TaskLinkType,
+      row.taskLinkType,
+      row.LINK_TYPE,
+      row.link_type,
+    ),
+  )
 
   return {
     DependencyId: stringValue(row.Id ?? row.LinkId ?? row.linkId) || `${projectId}:dependency:${index}`,
     ProjectId: projectId,
     PredecessorTaskId: extractTaskId(predecessor, row.StartId ?? row.startId ?? row.StartTaskId ?? row.startTaskId),
     SuccessorTaskId: extractTaskId(successor, row.EndId ?? row.endId ?? row.EndTaskId ?? row.endTaskId),
-    DependencyType: dependencyTypeValue == null ? undefined : DEPENDENCY_TYPES[dependencyTypeValue],
-    Lag: numberValue(row.Lag ?? row.lag),
+    DependencyType: dependencyType,
+    Lag: numberValue(firstDefined(
+      row.Lag,
+      row.lag,
+      row.LinkLag,
+      row.linkLag,
+      row.TaskLinkLag,
+      row.taskLinkLag,
+      row.LINK_LAG,
+      row.link_lag,
+    )),
   }
 }
 
@@ -83,10 +103,27 @@ function stringValue(value: unknown): string {
   return value == null ? '' : String(value).replace(/[{}]/g, '').trim()
 }
 
+function firstDefined(...values: unknown[]): unknown {
+  return values.find(value => value != null && value !== '')
+}
+
 function numberValue(value: unknown): number | undefined {
   if (value == null || value === '') return undefined
   const n = Number(value)
   return Number.isFinite(n) ? n : undefined
+}
+
+function dependencyTypeValue(value: unknown): PoDependencyType | undefined {
+  if (typeof value === 'string') {
+    const text = value.trim().toUpperCase().replace(/[\s_-]/g, '')
+    if (text === 'FS' || text === 'FINISHTOSTART') return 'FS'
+    if (text === 'SS' || text === 'STARTTOSTART') return 'SS'
+    if (text === 'FF' || text === 'FINISHTOFINISH') return 'FF'
+    if (text === 'SF' || text === 'STARTTOFINISH') return 'SF'
+  }
+
+  const numeric = numberValue(value)
+  return numeric == null ? undefined : DEPENDENCY_TYPES[numeric]
 }
 
 function getDependencyFetchConcurrency(): number {

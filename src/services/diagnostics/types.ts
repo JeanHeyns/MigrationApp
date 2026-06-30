@@ -19,6 +19,7 @@ export interface DiagnosticInput {
   selectedProjectIds: Set<string>
   projects: import('../../models/projectOnline.types').PoProject[]
   tasks: import('../../models/projectOnline.types').PoTask[]
+  dependencies: import('../../models/projectOnline.types').PoTaskDependency[]
   assignments: import('../../models/projectOnline.types').PoAssignment[]
   resources: import('../../models/projectOnline.types').PoResource[]
   /** Effective working-time per PO project id. */
@@ -59,10 +60,37 @@ export interface ProjectDiagnostic {
     scheduleModeMatch: boolean | null
   }
   tasks: TaskDiagnostic[]
+  dependencies: DependencyDiagnostic[]
   assignments: AssignmentDiagnostic[]
   resources: ResourceDiagnostic[]
   unmatchedTasks: string[]
   fetchError?: string
+}
+
+export interface DependencyDiagnostic {
+  dependencyId_source: string | null
+  dependencyId_target: string | null
+  source: {
+    predecessorTaskId: string | null
+    successorTaskId: string | null
+    predecessorTargetTaskId: string | null
+    successorTargetTaskId: string | null
+    dependencyType: string | null
+    lagTenthsOfMinute: number | null
+    expectedLagSeconds: number | null
+  } | null
+  target: (Record<string, unknown> & {
+    dependencyTypeLabel: string | null
+    lagSeconds: number | null
+  }) | null
+  match: {
+    status: 'matched' | 'missingSourceTaskMapping' | 'missingTargetDependency' | 'targetOnly'
+    predecessorMatches: boolean | null
+    successorMatches: boolean | null
+    typeMatches: boolean | null
+    lagMatches: boolean | null
+    note: string
+  }
 }
 
 export interface TaskDiagnostic {

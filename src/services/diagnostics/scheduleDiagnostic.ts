@@ -1,6 +1,7 @@
 import type { PoAssignment, PoTask } from '../../models/projectOnline.types'
 import type {
   AssignmentDiagnostic,
+  DependencyDiagnostic,
   DiagnosticInput,
   ProjectDiagnostic,
   ResourceDiagnostic,
@@ -9,7 +10,7 @@ import type {
 } from './types'
 import { listRecords } from '../plannerPremium/dataverseClient'
 import { cleanGuid } from '../plannerPremium/importHelpers'
-import { calendarWorkingDaysInclusive, MON_FRI_MASK, type ProjectCalendar } from '../plannerPremium/scheduleMath'
+import { calendarWorkingDaysInclusive, MON_FRI_MASK, workValueToHours, type ProjectCalendar } from '../plannerPremium/scheduleMath'
 
 // Bump together with package.json version.
 const MIGRATOR_VERSION = '0.0.0'
@@ -128,6 +129,7 @@ async function buildProjectDiagnostic(
   }
 
   const sourceTasks = input.tasks.filter(t => t.ProjectId === poProject.ProjectId)
+  const sourceDependencies = input.dependencies.filter(d => d.ProjectId === poProject.ProjectId)
   const sourceAssignments = input.assignments.filter(a => a.ProjectId === poProject.ProjectId)
   const assignedTaskIds = new Set(sourceAssignments.map(a => a.TaskId))
 
@@ -138,6 +140,7 @@ async function buildProjectDiagnostic(
     target: null,
     delta: { startDays: null, finishDays: null, hoursPerDayMatch: null, scheduleModeMatch: null },
     tasks: [],
+    dependencies: [],
     assignments: [],
     resources: [],
     unmatchedTasks: [],
@@ -162,11 +165,15 @@ async function buildProjectDiagnostic(
     }
 
     const targetTasks = await fetchTasksForProject(dvProjectId)
+    const taskTargetBySourceId = new Map<string, Record<string, unknown> | null>()
     diag.tasks = sourceTasks.map(poTask => {
       const matched = matchTargetTask(poTask, targetTasks)
+      taskTargetBySourceId.set(poTask.TaskId, matched)
       if (!matched) diag.unmatchedTasks.push(poTask.TaskId)
       return buildTaskDiagnostic(poTask, matched, settings.hoursPerDay, assignedTaskIds.has(poTask.TaskId), isProjectOnline)
     })
+    const targetDependencies = await fetchDependenciesForProject(dvProjectId)
+    diag.dependencies = buildDependencyDiagnostics(sourceDependencies, taskTargetBySourceId, targetDependencies)
 
     const { assignments, resources } = await buildAssignmentsAndResources(
       dvProjectId, sourceAssignments, settings.hoursPerDay,
@@ -207,7 +214,7 @@ function buildTaskDiagnostic(
       finishDate: toDateOnly(poTask.TaskFinishDate),
       durationDays,
       durationMinutes_source: durationMinutesSource,
-      ...(isProjectOnline ? { work_hours: num(poTask.TaskWork) } : {}),
+      ...(isProjectOnline ? { work_hours: workValueToHours(poTask.TaskWork) ?? null } : {}),
     },
     target: matched ? { ...matched } : null,
     delta: matched
@@ -223,6 +230,147 @@ function buildTaskDiagnostic(
         }
       : null,
   }
+}
+
+const DEPENDENCY_TYPE_VALUES: Record<string, number> = { FF: 0, FS: 1, SF: 2, SS: 3 }
+const DEPENDENCY_TYPE_LABELS: Record<number, string> = { 0: 'FF', 1: 'FS', 2: 'SF', 3: 'SS' }
+
+function buildDependencyDiagnostics(
+  sourceDependencies: import('../../models/projectOnline.types').PoTaskDependency[],
+  taskTargetBySourceId: Map<string, Record<string, unknown> | null>,
+  targetDependencies: Record<string, unknown>[],
+): DependencyDiagnostic[] {
+  const diagnostics: DependencyDiagnostic[] = []
+  const matchedTargetIds = new Set<string>()
+
+  for (const dependency of sourceDependencies) {
+    const predecessorTargetId = str(taskTargetBySourceId.get(dependency.PredecessorTaskId)?.msdyn_projecttaskid)
+    const successorTargetId = str(taskTargetBySourceId.get(dependency.SuccessorTaskId)?.msdyn_projecttaskid)
+    const dependencyType = dependency.DependencyType ?? 'FS'
+    const expectedType = DEPENDENCY_TYPE_VALUES[dependencyType] ?? DEPENDENCY_TYPE_VALUES.FS
+    const expectedLagSeconds = dependency.Lag == null ? null : Math.round(dependency.Lag * 6)
+
+    if (!predecessorTargetId || !successorTargetId) {
+      diagnostics.push({
+        dependencyId_source: dependency.DependencyId,
+        dependencyId_target: null,
+        source: {
+          predecessorTaskId: dependency.PredecessorTaskId,
+          successorTaskId: dependency.SuccessorTaskId,
+          predecessorTargetTaskId: predecessorTargetId,
+          successorTargetTaskId: successorTargetId,
+          dependencyType,
+          lagTenthsOfMinute: dependency.Lag ?? null,
+          expectedLagSeconds,
+        },
+        target: null,
+        match: {
+          status: 'missingSourceTaskMapping',
+          predecessorMatches: !!predecessorTargetId,
+          successorMatches: !!successorTargetId,
+          typeMatches: null,
+          lagMatches: null,
+          note: 'Source predecessor or successor task was not matched to a Dataverse task, so this dependency cannot be verified.',
+        },
+      })
+      continue
+    }
+
+    const target = targetDependencies.find(row =>
+      cleanGuid(str(row._msdyn_predecessortask_value) ?? undefined)?.toLowerCase() === predecessorTargetId.toLowerCase() &&
+      cleanGuid(str(row._msdyn_successortask_value) ?? undefined)?.toLowerCase() === successorTargetId.toLowerCase()
+    ) ?? null
+
+    if (!target) {
+      diagnostics.push({
+        dependencyId_source: dependency.DependencyId,
+        dependencyId_target: null,
+        source: {
+          predecessorTaskId: dependency.PredecessorTaskId,
+          successorTaskId: dependency.SuccessorTaskId,
+          predecessorTargetTaskId: predecessorTargetId,
+          successorTargetTaskId: successorTargetId,
+          dependencyType,
+          lagTenthsOfMinute: dependency.Lag ?? null,
+          expectedLagSeconds,
+        },
+        target: null,
+        match: {
+          status: 'missingTargetDependency',
+          predecessorMatches: null,
+          successorMatches: null,
+          typeMatches: null,
+          lagMatches: null,
+          note: 'Source dependency was present, but no Dataverse dependency row exists for the matched predecessor/successor pair.',
+        },
+      })
+      continue
+    }
+
+    const targetId = str(target.msdyn_projecttaskdependencyid)
+    if (targetId) matchedTargetIds.add(targetId.toLowerCase())
+    const targetType = num(target.msdyn_projecttaskdependencylinktype)
+    const targetLag = num(target.msdyn_projecttaskdependencylinklag)
+    const expectedLagForCompare = expectedLagSeconds ?? 0
+    const targetLagForCompare = targetLag ?? 0
+    const typeMatches = targetType === expectedType
+    const lagMatches = targetLagForCompare === expectedLagForCompare
+
+    diagnostics.push({
+      dependencyId_source: dependency.DependencyId,
+      dependencyId_target: targetId,
+      source: {
+        predecessorTaskId: dependency.PredecessorTaskId,
+        successorTaskId: dependency.SuccessorTaskId,
+        predecessorTargetTaskId: predecessorTargetId,
+        successorTargetTaskId: successorTargetId,
+        dependencyType,
+        lagTenthsOfMinute: dependency.Lag ?? null,
+        expectedLagSeconds,
+      },
+      target: {
+        ...target,
+        dependencyTypeLabel: targetType == null ? null : DEPENDENCY_TYPE_LABELS[targetType] ?? `unknown (${targetType})`,
+        lagSeconds: targetLag,
+      },
+      match: {
+        status: 'matched',
+        predecessorMatches: true,
+        successorMatches: true,
+        typeMatches,
+        lagMatches,
+        note: typeMatches && lagMatches
+          ? 'Source dependency matches target type and lag.'
+          : 'Source dependency row exists in target, but type and/or lag differs.',
+      },
+    })
+  }
+
+  for (const target of targetDependencies) {
+    const targetId = str(target.msdyn_projecttaskdependencyid)
+    if (targetId && matchedTargetIds.has(targetId.toLowerCase())) continue
+    const targetType = num(target.msdyn_projecttaskdependencylinktype)
+    diagnostics.push({
+      dependencyId_source: null,
+      dependencyId_target: targetId,
+      source: null,
+      target: {
+        ...target,
+        dependencyTypeLabel: targetType == null ? null : DEPENDENCY_TYPE_LABELS[targetType] ?? `unknown (${targetType})`,
+        lagSeconds: num(target.msdyn_projecttaskdependencylinklag),
+      },
+      match: {
+        status: 'targetOnly',
+        predecessorMatches: null,
+        successorMatches: null,
+        typeMatches: null,
+        lagMatches: null,
+        note: 'Dataverse dependency exists but did not match any source dependency predecessor/successor pair.',
+      },
+    })
+  }
+
+  return diagnostics
 }
 
 async function buildAssignmentsAndResources(
@@ -370,6 +518,10 @@ async function fetchProject(dvProjectId: string): Promise<Record<string, unknown
 
 async function fetchTasksForProject(dvProjectId: string): Promise<Record<string, unknown>[]> {
   return listRecords('msdyn_projecttasks', undefined, `_msdyn_project_value eq ${dvProjectId}`, 5000)
+}
+
+async function fetchDependenciesForProject(dvProjectId: string): Promise<Record<string, unknown>[]> {
+  return listRecords('msdyn_projecttaskdependencies', undefined, `_msdyn_project_value eq ${dvProjectId}`, 5000)
 }
 
 async function fetchAssignmentsForProject(dvProjectId: string): Promise<Record<string, unknown>[]> {

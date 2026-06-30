@@ -103,3 +103,21 @@ export function taskDurationDays(minutes: number | null | undefined, hoursPerDay
   const hpd = hoursPerDay > 0 ? hoursPerDay : DEFAULT_HOURS_PER_DAY
   return Math.round((minutes / 60 / hpd) * 100) / 100
 }
+
+/** Parses Project Online work/duration values to hours. Handles ISO PTnHnMnS and plain numeric hour values. */
+export function workValueToHours(value: unknown): number | undefined {
+  if (value == null || value === '') return undefined
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+
+  const text = String(value).trim()
+  const iso = /^PT(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?$/i.exec(text)
+  if (iso) {
+    const hours = Number(iso[1] ?? 0)
+    const minutes = Number(iso[2] ?? 0)
+    const seconds = Number(iso[3] ?? 0)
+    return hours + minutes / 60 + seconds / 3600
+  }
+
+  const numeric = Number(text)
+  return Number.isFinite(numeric) ? numeric : undefined
+}

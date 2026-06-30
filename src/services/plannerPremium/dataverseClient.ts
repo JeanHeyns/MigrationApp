@@ -6,11 +6,12 @@ import {
   associateNNRecord as _associateNNRecord,
   disassociateNNRecord as _disassociateNNRecord,
   listAssociatedNNRecords,
+  fetchEntityAttributes,
 } from '../dataverseService'
 import type { DvSolution, DvSystemUser } from '../../models/plannerPremium.types'
 import { classifyDataverseError } from './errorClassifier'
 
-export { listRecords, createRecord, updateRecord, listAssociatedNNRecords }
+export { listRecords, createRecord, updateRecord, listAssociatedNNRecords, fetchEntityAttributes }
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))

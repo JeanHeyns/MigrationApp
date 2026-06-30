@@ -32,13 +32,14 @@ import { writeProjects } from '../../services/plannerPremium/projectWriter'
 import type { ProjectWriteResult } from '../../services/plannerPremium/projectWriter'
 import { fetchSystemUsers } from '../../services/plannerPremium/dataverseClient'
 import type { DvSystemUser } from '../../models/plannerPremium.types'
-import { writeTasks, correctTaskSchedule } from '../../services/plannerPremium/taskWriter'
+import { writeTasks, correctTaskSchedule, correctTaskEffort, correctTaskProgress } from '../../services/plannerPremium/taskWriter'
 import type { TaskWriteResult } from '../../services/plannerPremium/taskWriter'
 import { readProjectCalendar, clearCalendarCache } from '../../services/plannerPremium/calendarReader'
 import { writeDependencies } from '../../services/plannerPremium/dependencyWriter'
 import type { DependencyWriteResult } from '../../services/plannerPremium/dependencyWriter'
 import { writeTeamMembers, writeAssignments } from '../../services/plannerPremium/assignmentWriter'
 import type { AssignmentWriteResult } from '../../services/plannerPremium/assignmentWriter'
+import { markProjectMigrationCompleted } from '../../services/plannerPremium/projectCompletionMarker'
 import { buildResolverMap, buildMultiLookupResolverDataOnly, clearResolverCaches } from '../../services/plannerPremium/resolverFactory'
 import type { FieldResolver, ResolverBuildWarning } from '../../services/plannerPremium/resolverFactory'
 import type { ImportError, ImportResult } from '../../models/plannerPremium.types'
@@ -48,6 +49,7 @@ import type { ProjectOverride } from '../../types/projectDefaults'
 import { effectiveSettings } from '../../utils/effectiveProjectSettings'
 import { getConcurrencyLimit, runWithConcurrency } from '../../services/plannerPremium/concurrency'
 import { useBrowserCloseGuard } from '../../hooks/useBrowserCloseGuard'
+import { workValueToHours } from '../../services/plannerPremium/scheduleMath'
 
 const useStyles = makeStyles({
   root: { padding: '32px', maxWidth: '1100px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '24px' },
@@ -152,6 +154,8 @@ export function Step4Import() {
   const [fatalError, setFatalError] = useState<string | null>(null)
   const [scheduleLoadMessage, setScheduleLoadMessage] = useState<string | null>(null)
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
+  const [skipSummaryTaskDependencies, setSkipSummaryTaskDependencies] = useState(true)
+  const [includeDependencyLag, setIncludeDependencyLag] = useState(false)
   const [stopButtonPressed, setStopButtonPressed] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [sortCol, setSortCol] = useState<SortCol>('name')
@@ -487,7 +491,6 @@ export function Step4Import() {
         if (resource.ResourceUID) resourceIdMap[resource.ResourceUID] = id
         if (resource.ResourceId) resourceIdMap[resource.ResourceId] = id
       }
-
       // Phase 2: Per-project parallel (project + team members + tasks + deps + assignments)
       setPhase('Importing')
       clearCalendarCache()
@@ -564,10 +567,11 @@ export function Step4Import() {
 
           if (migrationScope.tasks) {
             const projectTasks = importTasks.filter(t => t.ProjectId === project.ProjectId)
+            const taskEffortHours = buildTaskEffortHours(projectTasks, projectAssignments)
             const taskResults = await writeTasks(projectTasks, singleProjectMap, config, optionSetMappings, projectSettings.hoursPerDay, r => {
               setCompleted(c => c + 1)
               appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} task ${r.poTaskId}${r.error ? `: ${r.error.message}` : ''}`)
-            })
+            }, taskEffortHours)
             allTaskResults.push(...taskResults)
             const projectTaskIdMap = Object.fromEntries(
               taskResults.filter(r => r.dvTaskId)
@@ -576,11 +580,28 @@ export function Step4Import() {
 
             if (migrationScope.dependencies) {
               const projectDeps = importDependencies.filter(d => d.ProjectId === project.ProjectId)
+              const withLag = projectDeps.filter(d => d.Lag != null && d.Lag !== 0).length
+              appendLog(`[${project.ProjectName}] Source dependencies: ${projectDeps.length}${includeDependencyLag ? `, with lead/lag: ${withLag}` : ''}`)
               if (projectDeps.length > 0) {
                 const depResults = await writeDependencies(projectDeps, singleProjectMap, projectTaskIdMap, r => {
                   setCompleted(c => c + 1)
-                  appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} dependency ${r.poDependencyId}${r.error ? `: ${r.error.message}` : ''}`)
-                }, { tasks: projectTasks, hoursPerDay: projectSettings.hoursPerDay ?? 8 })
+                  const sourceType = r.dependencyType ?? 'FS'
+                  const sourceLagSeconds = r.lagSeconds ?? undefined
+                  const writtenType = r.writtenDependencyType ?? sourceType
+                  const writtenLagSeconds = r.writtenLagSeconds ?? undefined
+                  const lagInfo = r.sourceLagTenthsOfMinute != null
+                    ? ` ${sourceType} POlag=${r.sourceLagTenthsOfMinute} tenths-min/${sourceLagSeconds ?? 0}s`
+                    : ` ${sourceType}`
+                  const writtenInfo = r.success && (writtenType !== sourceType || writtenLagSeconds !== sourceLagSeconds)
+                    ? ` -> wrote ${writtenType}${writtenLagSeconds != null ? ` lag=${writtenLagSeconds}s` : ' without lag'}`
+                    : ''
+                  const fallbackInfo = r.fallbackApplied ? ` fallback=${r.fallbackApplied}` : ''
+                  appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} dependency ${r.poDependencyId}${lagInfo}${writtenInfo}${fallbackInfo}${r.warning ? ` (${r.warning})` : ''}${r.error ? `: ${r.error.message}` : ''}`)
+                }, {
+                  tasks: projectTasks,
+                  skipSummaryTaskDependencies,
+                  includeSourceLag: includeDependencyLag,
+                })
                 allDepResults.push(...depResults)
               }
             }
@@ -590,25 +611,71 @@ export function Step4Import() {
                 const assignResults = await writeAssignments(
                   projectAssignments, singleProjectMap, projectTaskIdMap, projectTeamMemberIdMap, r => {
                     setCompleted(c => c + 1)
-                    appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} assignment ${r.poAssignmentId}${r.error ? `: ${r.error.message}` : ''}`)
-                  }
+                    appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'SKIP'} assignment ${r.poAssignmentId}${r.warning ? ` (${r.warning})` : ''}${r.error ? `: ${r.error.message}` : ''}`)
+                  },
+                  projectTasks,
+                  projectCalendar,
                 )
                 allAssignResults.push(...assignResults)
 
-                // Fixed Effort + dependency recalculation move dates after assignments.
-                // Re-assert each task's original start and duration so the engine
-                // restores the imported schedule (recomputing units instead).
-                const correctionResults = await correctTaskSchedule(
-                  projectTasks, dvProjectId, projectTaskIdMap, projectCalendar, r => {
-                    appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} schedule ${r.poTaskId} → ${r.start?.slice(0, 10)} ${r.durationDays}d${r.error ? `: ${r.error.message}` : ''}`)
-                  }
-                )
-                const correctionFailures = correctionResults.filter(r => !r.success).length
-                if (correctionFailures > 0) {
-                  appendLog(`[${project.ProjectName}] ${correctionFailures} duration correction(s) failed`)
-                }
               }
             }
+
+            // Dependencies and assignments can both trigger PSS recalculation.
+            // Re-assert each task's original start, finish, and effort as the final step.
+            const correctionResults = await correctTaskSchedule(
+              projectTasks, dvProjectId, projectTaskIdMap, projectCalendar, r => {
+                appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} schedule ${r.poTaskId} → ${r.start?.slice(0, 10)} ${r.durationDays}d${r.error ? `: ${r.error.message}` : ''}`)
+              },
+              taskEffortHours,
+            )
+            const correctionFailures = correctionResults.filter(r => !r.success).length
+            if (correctionFailures > 0) {
+              appendLog(`[${project.ProjectName}] ${correctionFailures} schedule correction(s) failed`)
+            }
+
+            const effortCorrectionResults = await correctTaskEffort(
+              projectTasks, dvProjectId, projectTaskIdMap, taskEffortHours, r => {
+                appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} effort ${r.poTaskId} -> ${r.effortHours}h${r.error ? `: ${r.error.message}` : ''}`)
+              },
+            )
+            const effortCorrectionFailures = effortCorrectionResults.filter(r => !r.success).length
+            if (effortCorrectionFailures > 0) {
+              appendLog(`[${project.ProjectName}] ${effortCorrectionFailures} effort correction(s) failed`)
+            }
+
+            const progressCorrectionResults = await correctTaskProgress(
+              projectTasks, dvProjectId, projectTaskIdMap, r => {
+                appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} progress ${r.poTaskId} -> ${Math.round(r.progress * 100)}%${r.error ? `: ${r.error.message}` : ''}`)
+              },
+            )
+            const progressCorrectionFailures = progressCorrectionResults.filter(r => !r.success).length
+            if (progressCorrectionFailures > 0) {
+              appendLog(`[${project.ProjectName}] ${progressCorrectionFailures} progress correction(s) failed`)
+            }
+
+            const finalScheduleResults = await correctTaskSchedule(
+              projectTasks, dvProjectId, projectTaskIdMap, projectCalendar, r => {
+                appendLog(`[${project.ProjectName}] ${r.success ? 'OK' : 'ERR'} final schedule ${r.poTaskId} -> ${r.start?.slice(0, 10)} ${r.durationDays}d${r.error ? `: ${r.error.message}` : ''}`)
+              },
+              taskEffortHours,
+              { includeDuration: true },
+            )
+            const finalScheduleFailures = finalScheduleResults.filter(r => !r.success).length
+            if (finalScheduleFailures > 0) {
+              appendLog(`[${project.ProjectName}] ${finalScheduleFailures} final schedule correction(s) failed`)
+            }
+          }
+
+          try {
+            const markerResult = await markProjectMigrationCompleted(dvProjectId)
+            appendLog(
+              markerResult === 'updated'
+                ? `[${project.ProjectName}] OK project marker ppm_appliedtemplate=Migration`
+                : `[${project.ProjectName}] project marker skipped: ppm_appliedtemplate column not present`,
+            )
+          } catch (e) {
+            appendLog(`[${project.ProjectName}] ERR project marker ppm_appliedtemplate: ${String(e)}`)
           }
 
           completeProject(Date.now() - projectStart)
@@ -953,6 +1020,22 @@ export function Step4Import() {
         label="I understand selected project schedules will be cleared and rebuilt"
         onChange={(_, d) => setConfirmScheduleRebuild(!!d.checked)}
       />
+      {migrationScope.dependencies && (
+        <Checkbox
+          checked={skipSummaryTaskDependencies}
+          disabled={running}
+          label="No dependencies on summary tasks"
+          onChange={(_, d) => setSkipSummaryTaskDependencies(!!d.checked)}
+        />
+      )}
+      {migrationScope.dependencies && (
+        <Checkbox
+          checked={includeDependencyLag}
+          disabled={running}
+          label="Include source dependency lag/slack"
+          onChange={(_, d) => setIncludeDependencyLag(!!d.checked)}
+        />
+      )}
       </>
       )}
 
@@ -1094,6 +1177,38 @@ function formatDuration(ms: number): string {
   if (h > 0) return `${h}h ${m}m`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
+}
+
+function buildTaskEffortHours(tasks: PoTask[], assignments: PoAssignment[] = []): Map<string, number> {
+  const result = new Map<string, number>()
+  const assignmentHoursByTaskId = new Map<string, number>()
+
+  for (const assignment of assignments) {
+    const hours = workValueToHours(assignment.AssignmentWork ?? assignment.AssignmentRemainingWork)
+    if (hours == null) continue
+    assignmentHoursByTaskId.set(assignment.TaskId, (assignmentHoursByTaskId.get(assignment.TaskId) ?? 0) + hours)
+  }
+
+  for (const task of tasks) {
+    const taskWork = workValueToHours(task.TaskWork)
+    if (taskWork != null) {
+      result.set(task.TaskId, roundHours(taskWork))
+      continue
+    }
+
+    const assignmentWork = assignmentHoursByTaskId.get(task.TaskId)
+    if (assignmentWork != null) {
+      result.set(task.TaskId, roundHours(assignmentWork))
+      continue
+    }
+
+    if (task.TaskIsMilestone) result.set(task.TaskId, 0)
+  }
+  return result
+}
+
+function roundHours(value: number): number {
+  return Math.round(value * 100) / 100
 }
 
 function getResourceSourceId(resource: PoResource): string {

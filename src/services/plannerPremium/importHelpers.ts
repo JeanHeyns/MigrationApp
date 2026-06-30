@@ -53,6 +53,22 @@ export function chunks<T>(items: T[], size: number): T[][] {
   return out
 }
 
+/**
+ * Coerces a value destined for a Date-only (Edm.Date) column to `YYYY-MM-DD`.
+ * Dataverse Date columns (Format: DateOnly) reject full datetime literals like
+ * `2025-09-25T17:00:00`. We truncate the date portion from the string literal
+ * rather than parsing through `Date` to avoid timezone day-shifts on
+ * TimeZoneIndependent/DateOnly columns. Non datetime-shaped values pass through
+ * unchanged.
+ */
+export function toDateOnly(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed
+  const match = /^(\d{4}-\d{2}-\d{2})[T ]/.exec(trimmed)
+  return match ? match[1] : value
+}
+
 export function customFieldPayload(
   source: Record<string, unknown>,
   entityType: 'Project' | 'Task' | 'Resource',
@@ -109,6 +125,9 @@ export function customFieldPayload(
           payload[`${mapping.targetLogicalName}@odata.bind`] =
             `/${mapping.relatedEntity.logicalCollectionName}(${String(value).replace(/[{}]/g, '')})`
         }
+        break
+      case 'Date':
+        payload[mapping.targetLogicalName] = toDateOnly(value)
         break
       default:
         payload[mapping.targetLogicalName] = value

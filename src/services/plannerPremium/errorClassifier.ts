@@ -52,8 +52,9 @@ export function extractFailedBatchIndex(raw: unknown): number | null {
     break
   }
 
-  // Regex fallback
-  const match = text.match(/"failedBatchRequestIndex"\s*:\s*(\d+)/)
+  // Regex fallback for non-JSON wrappers and escaped Dataverse/PSS payloads.
+  const normalized = text.replace(/\\"/g, '"')
+  const match = normalized.match(/"failedBatchRequestIndex"\s*:\s*(\d+)/)
   return match ? parseInt(match[1], 10) : null
 }
 

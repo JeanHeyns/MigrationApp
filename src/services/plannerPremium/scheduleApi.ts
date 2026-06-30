@@ -1,4 +1,4 @@
-import { performUnboundAction } from './dataverseClient'
+import { listRecords, performUnboundAction } from './dataverseClient'
 import { classifyDataverseError, extractFailedBatchIndex } from './errorClassifier'
 import { cleanGuid } from './importHelpers'
 
@@ -61,6 +61,42 @@ export async function queueScheduleUpdate(
   })
 }
 
+/**
+ * Queues an update of a resource assignment's planned-work contour.
+ * This is intentionally separate from PssUpdateV1: Project Schedule API rejects
+ * `msdyn_plannedwork` on normal resource-assignment create/update calls.
+ */
+export async function queueResourceAssignmentContourUpdate(
+  operationSetId: string,
+  resourceAssignmentId: string,
+  updatedContours: string,
+): Promise<void> {
+  const payload = {
+    ResourceAssignmentId: resourceAssignmentId,
+    UpdatedContours: updatedContours,
+    OperationSetId: operationSetId,
+  }
+  try {
+    await performUnboundAction('msdyn_PssUpdateResourceAssignmentContourV1', payload)
+  } catch (e) {
+    if (!isMissingResourceAssignmentContourAction(e)) {
+      throw e
+    }
+    await performUnboundAction('msdyn_PssUpdateResourceAssignmentV1', payload)
+  }
+}
+
+export function isMissingResourceAssignmentContourAction(raw: unknown): boolean {
+  const message = String(raw).toLowerCase()
+  return (
+    message.includes('resource not found for the segment') &&
+    (
+      message.includes('msdyn_pssupdateresourceassignmentcontourv1') ||
+      message.includes('msdyn_pssupdateresourceassignmentv1')
+    )
+  )
+}
+
 export interface PssCreateOperation {
   id: string
   entity: Record<string, unknown>
@@ -98,10 +134,11 @@ export async function executeOperationSetWithRetry(
       succeeded.push(...working)
       working = []
     } catch (e) {
+      const operationSetFailure = opSetId ? await fetchOperationSetFailureDetails(opSetId) : null
       if (opSetId) await abandonOperationSet(opSetId)
-      const idx = extractFailedBatchIndex(e)
-      const cls = classifyDataverseError(e)
-      const rawErrorText = String(e)
+      const rawErrorText = appendOperationSetFailure(String(e), operationSetFailure?.log)
+      const idx = extractFailedBatchIndex(rawErrorText)
+      const cls = classifyDataverseError(rawErrorText)
       // Compare shape, not literal text: indices/GUIDs/timestamps differ per attempt
       const errorText = errorSignature(rawErrorText)
       console.warn(`[scheduleApi] OperationSet attempt ${attempt + 1} failed (${working.length} ops remaining, class=${cls}, failedIndex=${idx ?? 'n/a'}): ${rawErrorText.slice(0, 500)}`)
@@ -112,6 +149,14 @@ export async function executeOperationSetWithRetry(
         lastErrorText = errorText
         identicalFailures = 1
       }
+      if (idx !== null && idx >= 0 && idx < working.length) {
+        // Pinpointed failure — exclude this element and retry the rest
+        const failedOp = working[idx]
+        failed.push({ op: failedOp, reason: rawErrorText, errorClass: cls })
+        working = working.filter((_, i) => i !== idx)
+        continue
+      }
+
       // AlreadyExists is a legitimate per-op condition (re-runs), not systemic — keep pinpoint-retrying those.
       if (cls !== 'AlreadyExists' && identicalFailures >= MAX_IDENTICAL_FAILURES) {
         console.warn(`[scheduleApi] Same error ${MAX_IDENTICAL_FAILURES}× in a row — treating as systemic, failing ${working.length} remaining op(s)`)
@@ -122,17 +167,9 @@ export async function executeOperationSetWithRetry(
         break
       }
 
-      if (idx !== null && idx >= 0 && idx < working.length) {
-        // Pinpointed failure — exclude this element and retry the rest
-        const failedOp = working[idx]
-        failed.push({ op: failedOp, reason: String(e), errorClass: cls })
-        working = working.filter((_, i) => i !== idx)
-        continue
-      }
-
       // Cannot pinpoint — fail all remaining
       for (const op of working) {
-        failed.push({ op, reason: String(e), errorClass: cls })
+        failed.push({ op, reason: rawErrorText, errorClass: cls })
       }
       working = []
     }
@@ -152,4 +189,41 @@ function errorSignature(text: string): string {
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<guid>')
     .replace(/\d+/g, '<n>')
     .slice(0, 400)
+}
+
+interface OperationSetFailureDetails {
+  log: string
+}
+
+async function fetchOperationSetFailureDetails(operationSetId: string): Promise<OperationSetFailureDetails | null> {
+  try {
+    const operationSets = await listRecords(
+      'msdyn_operationsets',
+      '_msdyn_psserrorlog_value,msdyn_correlationid,msdyn_status',
+      `msdyn_operationsetid eq ${cleanGuid(operationSetId)}`,
+      1,
+    )
+    const errorLogId = stringValue(operationSets[0]?.['_msdyn_psserrorlog_value'])
+    if (!errorLogId) return null
+
+    const errorLogs = await listRecords(
+      'msdyn_psserrorlogs',
+      'msdyn_errorcode,msdyn_log,msdyn_callstack,msdyn_correlationid',
+      `msdyn_psserrorlogid eq ${cleanGuid(errorLogId)}`,
+      1,
+    )
+    const log = stringValue(errorLogs[0]?.['msdyn_log'])
+    return log ? { log } : null
+  } catch (error) {
+    console.warn(`[scheduleApi] Could not read PSS error log for OperationSet ${operationSetId}: ${String(error)}`)
+    return null
+  }
+}
+
+function appendOperationSetFailure(rawError: string, pssLog: string | undefined): string {
+  return pssLog ? `${rawError}\nPSS error log: ${pssLog}` : rawError
+}
+
+function stringValue(value: unknown): string {
+  return value == null ? '' : String(value).replace(/[{}]/g, '').trim()
 }

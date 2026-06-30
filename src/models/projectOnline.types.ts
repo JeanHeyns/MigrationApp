@@ -51,6 +51,8 @@ export interface PoResource {
   ResourceName: string
   ResourceEmailAddress?: string
   ResourceNTAccount?: string
+  ResourceIsGeneric?: boolean
+  IsGeneric?: boolean
   ResourceType?: number
   ResourceIsTeam?: boolean
 }
@@ -64,6 +66,8 @@ export interface PoAssignment {
   AssignmentStartDate?: string
   AssignmentFinishDate?: string
   AssignmentUnits?: number
+  AssignmentWork?: number | string
+  AssignmentRemainingWork?: number | string
   [key: string]: unknown
 }
 

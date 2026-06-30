@@ -259,6 +259,7 @@ async function applyProjectPatch(
 
   let patchSucceeded: boolean | undefined
   let patchErrorMsg: string | undefined
+  const patchFailedFields: SkippedField[] = []
 
   if (Object.keys(patch).length === 0) {
     patchSucceeded = undefined
@@ -266,8 +267,29 @@ async function applyProjectPatch(
     try {
       await patchRecord('msdyn_projects', dvProjectId, patch)
       patchSucceeded = true
-    } catch (e) {
-      patchErrorMsg = `Custom field patch failed: ${String(e)}`
+    } catch (bulkError) {
+      // The bulk PATCH is atomic — a single invalid column (e.g. a datetime
+      // sent to an Edm.Date field) rejects the whole payload, dropping every
+      // valid field with it. Retry field-by-field so the good columns still
+      // persist and only the offending column(s) are reported as skipped.
+      let anySucceeded = false
+      for (const [field, value] of Object.entries(patch)) {
+        try {
+          await patchRecord('msdyn_projects', dvProjectId, { [field]: value })
+          anySucceeded = true
+        } catch (fieldError) {
+          patchFailedFields.push({
+            poField: field,
+            dvField: field,
+            reason: `Patch rejected by Dataverse: ${String(fieldError)}`,
+            originalValue: value,
+          })
+        }
+      }
+      patchSucceeded = anySucceeded
+      if (patchFailedFields.length > 0) {
+        patchErrorMsg = `Custom field patch failed for ${patchFailedFields.length} field(s): ${patchFailedFields.map(f => f.dvField).join(', ')}`
+      }
     }
   }
 
@@ -331,18 +353,21 @@ async function applyProjectPatch(
     assocDiagnostics.push(diagEntry)
   }
 
+  const allSkipped = [...applied.skippedFields, ...patchFailedFields]
+  const skippedOut = allSkipped.length > 0 ? allSkipped : undefined
+
   if (patchErrorMsg) {
     return {
       error: nowError('Project', dvProjectId, patchErrorMsg),
-      skippedFields,
-      diagnostic: { ...diagnosticBase, patchSucceeded: false, patchError: patchErrorMsg },
+      skippedFields: skippedOut,
+      diagnostic: { ...diagnosticBase, patchSucceeded, patchError: patchErrorMsg },
       associationsCreated,
       associationDiagnostics: assocDiagnostics,
     }
   }
 
   return {
-    skippedFields,
+    skippedFields: skippedOut,
     diagnostic: { ...diagnosticBase, patchSucceeded },
     associationsCreated,
     associationDiagnostics: assocDiagnostics,
