@@ -4,9 +4,17 @@ import type { PoLookupTable } from '../../models/projectOnline.types'
 import type { SchemaCreationResults } from '../../models/dataOnly.types'
 import { createColumns, createMigrationColumns } from './columnManager'
 import { createOptionSets } from './choiceSetManager'
-import { ensureLookupEntity, insertLookupEntries, lookupEntityLogicalName, type LookupEntityResult } from './lookupEntityManager'
+import {
+  ensureLookupEntity,
+  ensureLookupParentRelationship,
+  hasHierarchicalEntries,
+  insertLookupEntries,
+  lookupEntityLogicalName,
+  type LookupEntityResult,
+  type LookupParentConfig,
+} from './lookupEntityManager'
 import { classifyDataverseError } from './errorClassifier'
-import { createManyToManyRelationship, getEntityManyToManyRelationships } from '../dataverseService'
+import { createManyToManyRelationship, fetchEntityDefinition, getEntityManyToManyRelationships } from '../dataverseService'
 
 export interface SchemaOrchestrationInput {
   mappingConfig: MappingConfiguration
@@ -37,7 +45,6 @@ function isLookupBackedMapping(mappingConfig: MappingConfiguration, lookupTableU
   return mappingConfig.fieldMappings.some(m =>
     !m.skip &&
     m.targetColumnType === 'Lookup' &&
-    !m.useExistingLookupEntity &&
     m.lookupTable?.LookupTableUID === lookupTableUID
   )
 }
@@ -53,6 +60,27 @@ function isMultiLookupBackedMapping(mappingConfig: MappingConfiguration, lookupT
     const poFieldName = m.customField.ODataFieldName || m.customField.CustomFieldName
     return isNNMultiLookupField(mappingConfig, poFieldName)
   })
+}
+
+function lookupSeedKey(lookupTableUID: string, targetEntityLogicalName: string): string {
+  return `${lookupTableUID}:${targetEntityLogicalName}`
+}
+
+async function existingLookupEntityResult(
+  lookupTableUID: string,
+  logicalName: string,
+  fallbackCollectionName: string | undefined,
+): Promise<LookupEntityResult> {
+  const entity = await fetchEntityDefinition(logicalName)
+  return {
+    lookupTableUID,
+    logicalName,
+    displayName: logicalName,
+    entitySetName: entity?.entitySetName ?? fallbackCollectionName ?? `${logicalName}s`,
+    primaryNameField: entity?.primaryNameField ?? 'name',
+    status: entity ? 'already_exists' : 'failed',
+    error: entity ? undefined : `Existing lookup entity "${logicalName}" could not be loaded.`,
+  }
 }
 
 export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput): Promise<SchemaOrchestrationResult> {
@@ -83,39 +111,83 @@ export async function orchestrateSchemaCreation(input: SchemaOrchestrationInput)
     isMultiLookupBackedMapping(mappingConfig, table.LookupTableUID)
   )
   const lookupEntities = new Map<string, LookupEntityResult>()
+  const seededLookupEntities = new Map<string, LookupEntityResult>()
 
   for (const table of lookupTables) {
-    onProgress(`Ensuring lookup entity "${table.LookupTableName}"...`)
-    const entityResult = await ensureLookupEntity(table, publisherPrefix, selectedSolution.uniquename)
-    lookupEntities.set(table.LookupTableUID, entityResult)
-    if (entityResult.status === 'created') {
-      results.lookupEntities.created.push({ logicalName: entityResult.logicalName, displayName: entityResult.displayName })
-      onProgress(`Lookup entity "${entityResult.logicalName}" created`, 'success')
-    } else if (entityResult.status === 'already_exists') {
-      results.lookupEntities.skipped.push({ logicalName: entityResult.logicalName, reason: 'already exists' })
-      onProgress(`Lookup entity "${entityResult.logicalName}" already exists; reusing`, 'warning')
-    } else {
-      results.lookupEntities.failed.push({ logicalName: entityResult.logicalName, error: entityResult.error ?? 'Unknown error' })
-      onProgress(`Lookup entity "${entityResult.logicalName}" failed: ${entityResult.error}`, 'error')
+    const singleLookupMappings = mappingConfig.fieldMappings.filter(m =>
+      !m.skip &&
+      m.targetColumnType === 'Lookup' &&
+      m.lookupTable?.LookupTableUID === table.LookupTableUID
+    )
+    const hasNNLookupMulti = isMultiLookupBackedMapping(mappingConfig, table.LookupTableUID)
+    const shouldEnsurePoLookupEntity = hasNNLookupMulti || singleLookupMappings.some(m => !m.useExistingLookupEntity)
+
+    if (shouldEnsurePoLookupEntity) {
+      onProgress(`Ensuring lookup entity "${table.LookupTableName}"...`)
+      const entityResult = await ensureLookupEntity(table, publisherPrefix, selectedSolution.uniquename)
+      lookupEntities.set(table.LookupTableUID, entityResult)
+      seededLookupEntities.set(lookupSeedKey(table.LookupTableUID, entityResult.logicalName), entityResult)
+      if (entityResult.status === 'created') {
+        results.lookupEntities.created.push({ logicalName: entityResult.logicalName, displayName: entityResult.displayName })
+        onProgress(`Lookup entity "${entityResult.logicalName}" created`, 'success')
+      } else if (entityResult.status === 'already_exists') {
+        results.lookupEntities.skipped.push({ logicalName: entityResult.logicalName, reason: 'already exists' })
+        onProgress(`Lookup entity "${entityResult.logicalName}" already exists; reusing`, 'warning')
+      } else {
+        results.lookupEntities.failed.push({ logicalName: entityResult.logicalName, error: entityResult.error ?? 'Unknown error' })
+        onProgress(`Lookup entity "${entityResult.logicalName}" failed: ${entityResult.error}`, 'error')
+      }
     }
 
-    onProgress(`Inserting lookup entries for "${table.LookupTableName}"...`)
-    const entryResults = await insertLookupEntries(entityResult, table.entries)
-    for (const entryResult of entryResults) {
-      if (entryResult.status === 'inserted') {
-        results.lookupEntries.inserted.push({ entity: entryResult.entity, name: entryResult.name })
-      } else if (entryResult.status === 'already_exists') {
-        results.lookupEntries.skipped.push({
-          entity: entryResult.entity,
-          name: entryResult.name,
-          reason: entryResult.error ?? 'already exists',
-        })
+    for (const mapping of singleLookupMappings.filter(m => m.useExistingLookupEntity && m.relatedEntity?.logicalName)) {
+      const logicalName = mapping.relatedEntity!.logicalName
+      const key = lookupSeedKey(table.LookupTableUID, logicalName)
+      if (seededLookupEntities.has(key)) continue
+      const entityResult = await existingLookupEntityResult(table.LookupTableUID, logicalName, mapping.relatedEntity?.logicalCollectionName)
+      seededLookupEntities.set(key, entityResult)
+      if (entityResult.status === 'failed') {
+        results.lookupEntities.failed.push({ logicalName: entityResult.logicalName, error: entityResult.error ?? 'Unknown error' })
+        onProgress(`Existing lookup entity "${logicalName}" failed: ${entityResult.error}`, 'error')
       } else {
-        results.lookupEntries.failed.push({
-          entity: entryResult.entity,
-          name: entryResult.name,
-          error: entryResult.error ?? 'Unknown error',
-        })
+        results.lookupEntities.skipped.push({ logicalName: entityResult.logicalName, reason: 'existing target selected' })
+        onProgress(`Existing lookup entity "${logicalName}" selected; seeding missing entries`, 'info')
+      }
+    }
+
+    for (const entityResult of seededLookupEntities.values()) {
+      if (entityResult.lookupTableUID !== table.LookupTableUID) continue
+      let parentLookup: LookupParentConfig | null = null
+      if (hasHierarchicalEntries(table)) {
+        const existingMapping = singleLookupMappings.find(m => m.relatedEntity?.logicalName === entityResult.logicalName)
+        parentLookup = existingMapping?.lookupParent ?? null
+        if (!parentLookup && shouldEnsurePoLookupEntity && lookupEntities.get(table.LookupTableUID)?.logicalName === entityResult.logicalName) {
+          parentLookup = await ensureLookupParentRelationship(entityResult, publisherPrefix, selectedSolution.uniquename)
+        }
+        if (parentLookup) {
+          onProgress(`Using parent lookup "${parentLookup.lookupLogicalName}" for "${entityResult.logicalName}" hierarchy`, 'info')
+        } else {
+          onProgress(`Lookup table "${table.LookupTableName}" is hierarchical, but no parent lookup is configured; seeding flat values`, 'warning')
+        }
+      }
+
+      onProgress(`Seeding lookup entries for "${table.LookupTableName}" into "${entityResult.logicalName}"...`)
+      const entryResults = await insertLookupEntries(entityResult, table.entries, { parentLookup })
+      for (const entryResult of entryResults) {
+        if (entryResult.status === 'inserted') {
+          results.lookupEntries.inserted.push({ entity: entryResult.entity, name: entryResult.name })
+        } else if (entryResult.status === 'already_exists') {
+          results.lookupEntries.skipped.push({
+            entity: entryResult.entity,
+            name: entryResult.name,
+            reason: entryResult.error ?? 'already exists',
+          })
+        } else {
+          results.lookupEntries.failed.push({
+            entity: entryResult.entity,
+            name: entryResult.name,
+            error: entryResult.error ?? 'Unknown error',
+          })
+        }
       }
     }
   }

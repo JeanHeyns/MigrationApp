@@ -23,7 +23,7 @@ import { fetchAssignmentsForProjects } from '../../services/projectOnline/assign
 const useStyles = makeStyles({
   root: {
     padding: '32px',
-    maxWidth: '1100px',
+    maxWidth: '760px',
     margin: '0 auto',
     display: 'flex',
     flexDirection: 'column',

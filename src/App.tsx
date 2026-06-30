@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { Button, FluentProvider, webLightTheme, makeStyles } from '@fluentui/react-components'
 import { MigrationProvider, useMigration } from './app/MigrationContext'
 import { StepRouter } from './app/StepRouter'
@@ -45,6 +46,14 @@ const useStyles = makeStyles({
 function WizardShell() {
   const styles = useStyles()
   const { currentStep, setCurrentStep, clearResolvedDataverseUrl } = useMigration()
+  const contentRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      contentRef.current?.scrollTo({ top: 0, left: 0 })
+      window.scrollTo({ top: 0, left: 0 })
+    })
+  }, [currentStep])
 
   async function handleResetDataverseUrl() {
     await clearManualDataverseOrgUrl()
@@ -79,7 +88,7 @@ function WizardShell() {
 
       <StepIndicator currentStep={currentStep} />
 
-      <main className={styles.content}>
+      <main ref={contentRef} className={styles.content}>
         <ErrorBoundary>
           <StepRouter />
         </ErrorBoundary>

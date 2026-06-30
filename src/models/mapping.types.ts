@@ -32,6 +32,7 @@ export interface FieldMapping {
   useExistingField: boolean   // map to existing DV field - skip column creation
   useExistingLookupEntity?: boolean
   relatedEntity?: { logicalName: string; logicalCollectionName: string }  // required when targetColumnType === 'Lookup'
+  lookupParent?: { lookupLogicalName: string; navigationPropertyName?: string } // optional self-lookup used for hierarchical lookup tables
   optionSetName?: string      // existing global choice name for OptionSet/MultiSelectOptionSet
   manualDefault?: string      // LookupEntryUID for OptionSet; raw string for other types
   matchSource?: 'auto' | 'manual'  // dataOnly mode: how targetLogicalName was set

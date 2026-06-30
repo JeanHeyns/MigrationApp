@@ -1,5 +1,5 @@
 import type { PoLookupEntry, PoLookupTable } from '../../models/projectOnline.types'
-import { createEntityDefinition, createRecord, fetchEntityDefinition, listAllRecords, performUnboundAction } from '../dataverseService'
+import { createEntityDefinition, createOneToManyRelationship, createRecord, fetchEntityDefinition, fetchEntityManyToOneRelationships, listAllRecords, performUnboundAction } from '../dataverseService'
 
 export interface LookupEntityResult {
   lookupTableUID: string
@@ -16,6 +16,11 @@ export interface LookupEntryResult {
   name: string
   status: 'inserted' | 'already_exists' | 'failed'
   error?: string
+}
+
+export interface LookupParentConfig {
+  lookupLogicalName: string
+  navigationPropertyName?: string
 }
 
 function dvLabel(text: string) {
@@ -65,6 +70,34 @@ function normalizedName(name: string): string {
 function entryName(entry: PoLookupEntry): string {
   const value = entry.LookupEntryFullValue || entry.LookupEntryValue || entry.LookupEntryUID
   return value.length > 200 ? `${value.slice(0, 197)}...` : value
+}
+
+function entryPath(entry: PoLookupEntry): string[] {
+  const full = (entry.LookupEntryFullValue || '').trim()
+  const leaf = (entry.LookupEntryValue || '').trim()
+  const value = full || leaf || entry.LookupEntryUID
+  if (full.includes('.')) {
+    return full.split('.').map(part => part.trim()).filter(Boolean)
+  }
+  return [leaf || value]
+}
+
+export function hasHierarchicalEntries(poLookupTable: PoLookupTable): boolean {
+  return poLookupTable.entries.some(entry => entryPath(entry).length > 1)
+}
+
+function hierarchyKey(path: string[]): string {
+  return path.map(part => normalizedName(part)).join('\u001f')
+}
+
+function lookupRecordId(record: Record<string, unknown>, entityLogicalName: string): string {
+  return String(
+    record[`${entityLogicalName}id`] ??
+    record[`${entityLogicalName}Id`] ??
+    record.id ??
+    record.Id ??
+    ''
+  ).replace(/[{}]/g, '')
 }
 
 async function addEntityToSolution(metadataId: string | undefined, solutionUniqueName: string): Promise<void> {
@@ -156,9 +189,52 @@ export async function ensureLookupEntity(
   }
 }
 
+export async function ensureLookupParentRelationship(
+  entityResult: LookupEntityResult,
+  publisherPrefix: string,
+  solutionUniqueName: string,
+): Promise<LookupParentConfig | null> {
+  if (entityResult.status === 'failed') return null
+
+  const lookupSchemaName = `${publisherPrefix}_parent`.slice(0, 47)
+  const relationshipSchemaName = `${publisherPrefix}_${entityResult.logicalName.replace(/_/g, '')}_parent`.slice(0, 100)
+
+  try {
+    const relationship = await createOneToManyRelationship({
+      referencedEntity: entityResult.logicalName,
+      referencingEntity: entityResult.logicalName,
+      lookupSchemaName,
+      lookupDisplayName: 'Parent',
+      relationshipSchemaName,
+      solutionUniqueName,
+    })
+    return {
+      lookupLogicalName: relationship.lookupLogicalName,
+      navigationPropertyName: relationship.navigationProperty,
+    }
+  } catch {
+    try {
+      const rels = await fetchEntityManyToOneRelationships(entityResult.logicalName)
+      const rel = rels.find(r =>
+        r.ReferencedEntity === entityResult.logicalName &&
+        r.ReferencingAttribute === lookupSchemaName.toLowerCase()
+      ) ?? rels.find(r => r.ReferencedEntity === entityResult.logicalName)
+      return rel
+        ? {
+            lookupLogicalName: rel.ReferencingAttribute,
+            navigationPropertyName: rel.ReferencingEntityNavigationPropertyName,
+          }
+        : null
+    } catch {
+      return null
+    }
+  }
+}
+
 export async function insertLookupEntries(
   entityResult: LookupEntityResult,
   poLookupEntries: PoLookupEntry[],
+  options?: { parentLookup?: LookupParentConfig | null },
 ): Promise<LookupEntryResult[]> {
   if (entityResult.status === 'failed') {
     return poLookupEntries.map(entry => ({
@@ -170,12 +246,40 @@ export async function insertLookupEntries(
   }
 
   const results: LookupEntryResult[] = []
-  const seen = new Set<string>()
+  const parentLookup = options?.parentLookup ?? null
+  const hierarchical = !!parentLookup && poLookupEntries.some(entry => entryPath(entry).length > 1)
+  const idField = `${entityResult.logicalName}id`
+  const parentValueField = parentLookup ? `_${parentLookup.lookupLogicalName}_value` : null
+  const recordsByPath = new Map<string, string>()
   try {
-    const existing = await listAllRecords(entityResult.entitySetName, [entityResult.primaryNameField], { pageSize: 5000 })
-    for (const row of existing) {
-      const name = String(row[entityResult.primaryNameField] ?? '')
-      if (name) seen.add(normalizedName(name))
+    const selectFields = [idField, entityResult.primaryNameField]
+    if (parentValueField) selectFields.push(parentValueField)
+    const existing = await listAllRecords(entityResult.entitySetName, selectFields, { pageSize: 5000 })
+    if (hierarchical && parentValueField) {
+      const nodes = new Map<string, { name: string; parentId: string }>()
+      for (const row of existing) {
+        const id = lookupRecordId(row, entityResult.logicalName)
+        const name = String(row[entityResult.primaryNameField] ?? '')
+        const parentId = String(row[parentValueField] ?? '').replace(/[{}]/g, '')
+        if (id && name) nodes.set(id, { name, parentId })
+      }
+      const pathForId = (id: string, seenIds = new Set<string>()): string[] => {
+        const node = nodes.get(id)
+        if (!node || seenIds.has(id)) return []
+        seenIds.add(id)
+        const parentPath = node.parentId ? pathForId(node.parentId, seenIds) : []
+        return [...parentPath, node.name]
+      }
+      for (const id of nodes.keys()) {
+        const path = pathForId(id)
+        if (path.length > 0) recordsByPath.set(hierarchyKey(path), id)
+      }
+    } else {
+      for (const row of existing) {
+        const name = String(row[entityResult.primaryNameField] ?? '')
+        const id = lookupRecordId(row, entityResult.logicalName)
+        if (name && id) recordsByPath.set(hierarchyKey([name]), id)
+      }
     }
   } catch (e) {
     return poLookupEntries.map(entry => ({
@@ -186,21 +290,39 @@ export async function insertLookupEntries(
     }))
   }
 
-  for (const entry of poLookupEntries) {
-    const name = entryName(entry)
-    const key = normalizedName(name)
+  const entries = [...poLookupEntries].sort((a, b) => entryPath(a).length - entryPath(b).length)
+  for (const entry of entries) {
+    const path = hierarchical ? entryPath(entry) : [entryName(entry)]
+    const name = hierarchical ? path[path.length - 1] : entryName(entry)
+    const key = hierarchyKey(path)
     if (!key) {
       results.push({ entity: entityResult.logicalName, name, status: 'already_exists', error: 'Blank source value skipped.' })
       continue
     }
-    if (seen.has(key)) {
+    if (recordsByPath.has(key)) {
       results.push({ entity: entityResult.logicalName, name, status: 'already_exists' })
       continue
     }
 
     try {
-      await createRecord(entityResult.entitySetName, { [entityResult.primaryNameField]: name })
-      seen.add(key)
+      const item: Record<string, unknown> = { [entityResult.primaryNameField]: name }
+      if (hierarchical && parentLookup && path.length > 1) {
+        const parentId = recordsByPath.get(hierarchyKey(path.slice(0, -1)))
+        if (parentId && parentLookup.navigationPropertyName) {
+          item[`${parentLookup.navigationPropertyName}@odata.bind`] = `/${entityResult.entitySetName}(${parentId})`
+        } else {
+          results.push({
+            entity: entityResult.logicalName,
+            name,
+            status: 'failed',
+            error: `Parent lookup value "${path.slice(0, -1).join('.')}" was not found.`,
+          })
+          continue
+        }
+      }
+      const created = await createRecord(entityResult.entitySetName, item)
+      const createdId = lookupRecordId(created, entityResult.logicalName)
+      if (createdId) recordsByPath.set(key, createdId)
       results.push({ entity: entityResult.logicalName, name, status: 'inserted' })
     } catch (e) {
       results.push({ entity: entityResult.logicalName, name, status: 'failed', error: String(e) })
