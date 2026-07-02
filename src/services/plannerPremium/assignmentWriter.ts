@@ -87,6 +87,11 @@ export async function writeTeamMembers(
   return results
 }
 
+export interface AssignmentWriteOptions {
+  /** When true, assignments whose source work is 0 hours are created anyway (default: skipped). */
+  includeZeroWorkAssignments?: boolean
+}
+
 export async function writeAssignments(
   assignments: PoAssignment[],
   projectIdMap: Record<string, string>,
@@ -95,6 +100,7 @@ export async function writeAssignments(
   onProgress?: (result: AssignmentWriteResult) => void,
   tasks: PoTask[] = [],
   calendar?: ProjectCalendar,
+  options?: AssignmentWriteOptions,
 ): Promise<AssignmentWriteResult[]> {
   const results: AssignmentWriteResult[] = []
   const assignmentsByProject = groupAssignmentsByProject(assignments)
@@ -134,7 +140,7 @@ export async function writeAssignments(
         const resourceUid = resourceKeys[0] ?? ''
         const sourceId = assignment.AssignmentId ?? `${assignment.TaskId}:${resourceUid}`
         const sourceHours = getAssignmentSourceHours(assignment)
-        if (sourceHours <= 0) {
+        if (!options?.includeZeroWorkAssignments && sourceHours <= 0) {
           const result: AssignmentWriteResult = {
             poAssignmentId: sourceId,
             success: false,

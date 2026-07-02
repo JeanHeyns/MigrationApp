@@ -6,6 +6,7 @@ import { executeOperationSetWithRetry } from './scheduleApi'
 export interface DependencyWriteResult {
   poDependencyId: string
   dvDependencyId?: string
+  projectId?: string
   dependencyType?: PoDependencyType
   sourceLagTenthsOfMinute?: number
   lagSeconds?: number
@@ -43,6 +44,20 @@ export function dependencyLagTenthsOfMinute(dependency: PoTaskDependency, includ
 export function dependencyLagSeconds(dependency: PoTaskDependency, includeSourceLag: boolean | undefined): number | null {
   const lagTenthsOfMinute = dependencyLagTenthsOfMinute(dependency, includeSourceLag)
   return lagTenthsOfMinute == null ? null : Math.round(lagTenthsOfMinute * 6)
+}
+
+/**
+ * Degrading fallbacks (strip lag / coerce to FS) must only fire when the server
+ * actually rejected that aspect of the payload. Transient failures (throttling,
+ * PSS recalculation, operation-set conflicts) are retried with the original
+ * payload instead — otherwise a temporary hiccup permanently loses lag or type.
+ */
+export function isLagRelatedFailure(reason: string): boolean {
+  return /linklag|\blag\b/i.test(reason)
+}
+
+export function isLinkTypeRelatedFailure(reason: string): boolean {
+  return /linktype|link[\s-]?type|dependencytype/i.test(reason)
 }
 
 export async function writeDependencies(
@@ -153,12 +168,38 @@ export async function writeDependencies(
         `Project Online dependency import ${new Date().toISOString()}`,
       )
 
+      // Recovery pass: retry failures once with the ORIGINAL payload before any
+      // degrading fallback. Transient PSS failures (throttling, engine still
+      // recalculating after task creation, opset conflicts from parallel
+      // projects) recover here with lag and link type fully intact.
+      const retryOriginal = batchResult.failed.filter(f => f.errorClass !== 'AlreadyExists')
+      if (retryOriginal.length > 0) {
+        console.warn(`[dependencyWriter] ${retryOriginal.length} dependency op(s) failed - retrying once with original payload`)
+        const originalOps = retryOriginal.map(f => ({ id: f.op.id, entity: { ...f.op.entity } }))
+        const originalRetryResult = await executeOperationSetWithRetry(
+          projectId,
+          originalOps,
+          `Project Online dependency import (original payload retry) ${new Date().toISOString()}`,
+        )
+        const retriedIds = new Set(originalOps.map(o => o.id))
+        batchResult.failed = batchResult.failed.filter(f => !retriedIds.has(f.op.id))
+        batchResult.succeeded.push(...originalRetryResult.succeeded)
+        batchResult.failed.push(...originalRetryResult.failed)
+
+        for (const op of originalRetryResult.succeeded) {
+          fallbackAuditFor(fallbackAuditByPoId, op.id).messages.push(
+            'transient failure recovered by retrying the original payload',
+          )
+        }
+      }
+
       const retryWithoutLag = batchResult.failed.filter(f =>
         f.errorClass !== 'AlreadyExists' &&
-        'msdyn_projecttaskdependencylinklag' in f.op.entity
+        'msdyn_projecttaskdependencylinklag' in f.op.entity &&
+        isLagRelatedFailure(f.reason)
       )
       if (retryWithoutLag.length > 0) {
-        console.warn(`[dependencyWriter] ${retryWithoutLag.length} dependency op(s) failed with source lag set - retrying without lag`)
+        console.warn(`[dependencyWriter] ${retryWithoutLag.length} dependency op(s) rejected on source lag - retrying without lag`)
         for (const failure of retryWithoutLag) {
           fallbackAuditFor(fallbackAuditByPoId, failure.op.id).messages.push(
             `source lag rejected (${failure.errorClass}): ${compactFailureReason(failure.reason)}`,
@@ -195,10 +236,13 @@ export async function writeDependencies(
 
       const retryAsFs = batchResult.failed.filter(f => {
         const source = dependencyById.get(f.op.id)
-        return f.errorClass !== 'AlreadyExists' && source?.DependencyType && source.DependencyType !== 'FS'
+        return f.errorClass !== 'AlreadyExists' &&
+          source?.DependencyType &&
+          source.DependencyType !== 'FS' &&
+          isLinkTypeRelatedFailure(f.reason)
       })
       if (retryAsFs.length > 0) {
-        console.warn(`[dependencyWriter] ${retryAsFs.length} non-FS dependency op(s) failed - retrying as FS with fallback warning`)
+        console.warn(`[dependencyWriter] ${retryAsFs.length} non-FS dependency op(s) rejected on link type - retrying as FS with fallback warning`)
         for (const failure of retryAsFs) {
           const source = dependencyById.get(failure.op.id)
           fallbackAuditFor(fallbackAuditByPoId, failure.op.id).messages.push(
@@ -243,6 +287,7 @@ export async function writeDependencies(
         const result: DependencyWriteResult = {
           poDependencyId: op.id,
           dvDependencyId: dvIdByPoId[op.id],
+          projectId: poProjectId,
           dependencyType: metadata?.dependencyType,
           sourceLagTenthsOfMinute: metadata?.sourceLagTenthsOfMinute,
           lagSeconds: metadata?.lagSeconds ?? undefined,

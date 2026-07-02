@@ -1,6 +1,16 @@
 import type { PoProject, PoTask } from '../models/projectOnline.types'
 import type { ProjectFilter } from '../app/MigrationContext'
 
+/**
+ * Project dates come from the source as full datetimes ("2024-05-01T08:00:00")
+ * while the filter inputs are date-only ("2024-05-01"). Compare on the date
+ * part only — a raw string compare makes the to-filters exclusive on the
+ * boundary day ("2024-05-01T08:00:00" > "2024-05-01").
+ */
+function toDatePart(value: string): string {
+  return value.slice(0, 10)
+}
+
 export function applyFilter(
   projects: PoProject[],
   filter: ProjectFilter,
@@ -13,16 +23,16 @@ export function applyFilter(
     }
 
     if (filter.startDateFrom && p.ProjectStartDate) {
-      if (p.ProjectStartDate < filter.startDateFrom) return false
+      if (toDatePart(p.ProjectStartDate) < filter.startDateFrom) return false
     }
     if (filter.startDateTo && p.ProjectStartDate) {
-      if (p.ProjectStartDate > filter.startDateTo) return false
+      if (toDatePart(p.ProjectStartDate) > filter.startDateTo) return false
     }
     if (filter.finishDateFrom && p.ProjectFinishDate) {
-      if (p.ProjectFinishDate < filter.finishDateFrom) return false
+      if (toDatePart(p.ProjectFinishDate) < filter.finishDateFrom) return false
     }
     if (filter.finishDateTo && p.ProjectFinishDate) {
-      if (p.ProjectFinishDate > filter.finishDateTo) return false
+      if (toDatePart(p.ProjectFinishDate) > filter.finishDateTo) return false
     }
 
     if (filter.ownerNames.length > 0) {

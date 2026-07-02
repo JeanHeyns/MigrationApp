@@ -342,6 +342,19 @@ function bool(v: unknown): boolean | undefined {
   return undefined
 }
 
+/**
+ * SheetJS (cellDates) and `new Date(string)` both produce LOCAL-midnight Dates.
+ * `toISOString()` converts to UTC first, which in any UTC+ timezone shifts the
+ * date one day back (2024-01-15 00:00 CET → "2024-01-14T23:00:00Z"). Format
+ * from the local date components instead.
+ */
+function localDateOnly(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 function toISODate(
   v: unknown,
   sheet: string,
@@ -360,7 +373,7 @@ function toISODate(
       })
       return undefined
     }
-    return v.toISOString().split('T')[0]
+    return localDateOnly(v)
   }
   const s = String(v).trim()
   if (!s) return undefined
@@ -368,7 +381,7 @@ function toISODate(
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.split('T')[0]
   // Last-resort parse
   const parsed = new Date(s)
-  if (!isNaN(parsed.getTime())) return parsed.toISOString().split('T')[0]
+  if (!isNaN(parsed.getTime())) return localDateOnly(parsed)
   pushWarning(warnings, capCounts, {
     sheet, row, column,
     code: 'INVALID_DATE_CLEARED',

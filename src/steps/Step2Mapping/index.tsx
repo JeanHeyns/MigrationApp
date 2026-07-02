@@ -1028,16 +1028,26 @@ export function Step2Mapping() {
     reader.onload = ev => {
       try {
         const config = JSON.parse(ev.target?.result as string) as MappingConfiguration
+        if (!Array.isArray(config.fieldMappings)) {
+          throw new Error('fieldMappings missing')
+        }
         setFieldMappings(config.fieldMappings)
         setMultiLookupMappingsState(config.multiLookups ?? [])
         const loadedMode = config.migrationMode ?? 'full'
-        setMigrationMode(loadedMode)
+        // setMigrationMode always clears schemaSnapshot + resolverPlan (mode-switch
+        // semantics). Only invoke it on an actual mode change, so loading a mapping
+        // for the current mode keeps a scan that was already run.
+        const modeChanged = loadedMode !== migrationMode
+        if (modeChanged) setMigrationMode(loadedMode)
         // Persist as the source of truth. The init effect re-derives mappings on every
         // schemaSnapshot change (e.g. a rescan, which a dataOnly load always needs since
         // the snapshot is not part of the JSON). Without this, that rescan rebuilds the
         // mapping from auto-detection and silently discards the loaded config.
         setMappingConfig(config)
-        if (loadedMode === 'dataOnly' && !schemaSnapshot) {
+        // A mode change just cleared the snapshot, so the closure value only counts
+        // when the mode stayed the same.
+        const snapshotAvailable = !modeChanged && !!schemaSnapshot
+        if (loadedMode === 'dataOnly' && !snapshotAvailable) {
           setLoadWarning('Loaded a data-only mapping — go back to Step 1, select a solution and run the schema scan before proceeding.')
         } else {
           setLoadWarning(null)

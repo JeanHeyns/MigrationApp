@@ -17,7 +17,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3, retryOnTimeout = true): Promise<T> {
   let lastErr: unknown
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -25,7 +25,8 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
     } catch (err) {
       lastErr = err
       const cls = classifyDataverseError(err)
-      if ((cls !== 'Timeout' && cls !== 'Throttled') || attempt === maxAttempts) throw err
+      const retryable = cls === 'Throttled' || (retryOnTimeout && cls === 'Timeout')
+      if (!retryable || attempt === maxAttempts) throw err
       const baseDelay = cls === 'Throttled' ? 10000 : 2000
       const delay = baseDelay * Math.pow(2.5, attempt - 1)
       await sleep(delay + Math.random() * 500)
@@ -34,11 +35,27 @@ async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<T> {
   throw lastErr
 }
 
+/**
+ * PSS actions that mutate operation-set or record state. A timed-out call may
+ * have SUCCEEDED server-side, so replaying it double-queues ops, re-executes an
+ * operation set, or creates duplicate records. Throttled (429) is different:
+ * the server rejected before executing, so retrying stays safe for every action.
+ */
+const TIMEOUT_RETRY_UNSAFE_ACTIONS = new Set([
+  'msdyn_ExecuteOperationSetV1',
+  'msdyn_PssCreateV1',
+  'msdyn_PssUpdateV1',
+  'msdyn_PssDeleteV1',
+  'msdyn_PssUpdateResourceAssignmentContourV1',
+  'msdyn_PssUpdateResourceAssignmentV1',
+  'msdyn_CreateTeamMemberV1',
+])
+
 export async function performUnboundAction(
   actionName: string,
   item?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  return withRetry(() => _performUnboundAction(actionName, item))
+  return withRetry(() => _performUnboundAction(actionName, item), 3, !TIMEOUT_RETRY_UNSAFE_ACTIONS.has(actionName))
 }
 
 export async function fetchSystemUsers(): Promise<DvSystemUser[]> {

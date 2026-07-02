@@ -156,6 +156,7 @@ export function Step4Import() {
   const [confirmScheduleRebuild, setConfirmScheduleRebuild] = useState(false)
   const [skipSummaryTaskDependencies, setSkipSummaryTaskDependencies] = useState(true)
   const [includeDependencyLag, setIncludeDependencyLag] = useState(false)
+  const [includeZeroWorkAssignments, setIncludeZeroWorkAssignments] = useState(false)
   const [stopButtonPressed, setStopButtonPressed] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [sortCol, setSortCol] = useState<SortCol>('name')
@@ -335,15 +336,18 @@ export function Step4Import() {
   }
 
   function makeResult(entity: string, totalRows: number, errors: ImportError[]): ImportResult {
-    const realErrors = errors.filter(e => e.errorClass !== 'AlreadyExists' && e.errorClass !== 'Skipped')
-    const skipped = errors.length - realErrors.length
+    // 'DependencyFallback' entries are warnings on records that DID import
+    // (with degraded type/lag) — shown in the report but not counted as failed.
+    const warnings = errors.filter(e => e.errorClass === 'DependencyFallback')
+    const realErrors = errors.filter(e => e.errorClass !== 'AlreadyExists' && e.errorClass !== 'Skipped' && e.errorClass !== 'DependencyFallback')
+    const skipped = errors.length - realErrors.length - warnings.length
     return {
       entity,
       total: totalRows,
       succeeded: totalRows - realErrors.length - skipped,
       failed: realErrors.length,
       skipped,
-      errors: realErrors,
+      errors: [...realErrors, ...warnings],
     }
   }
 
@@ -449,7 +453,9 @@ export function Step4Import() {
         const [tasks, dependencies, assignments, teamMembers] = await Promise.all([
           fetchTasksForProjects(siteUrl, selectedProjects),
           migrationScope.dependencies ? fetchDependencies(siteUrl, selectedProjects) : Promise.resolve([]),
-          migrationScope.assignments ? fetchAssignmentsForProjects(siteUrl, selectedProjects) : Promise.resolve([]),
+          migrationScope.assignments
+            ? fetchAssignmentsForProjects(siteUrl, selectedProjects, { includeZeroWork: includeZeroWorkAssignments })
+            : Promise.resolve([]),
           fetchTeamMembersForProjects(siteUrl, selectedProjects),
         ])
         importTasks = tasks
@@ -468,19 +474,25 @@ export function Step4Import() {
         )
       )
 
-      let totalOps = data.resources.length + selectedProjects.length + effectiveTeamMembers.length
+      let totalOps = selectedProjects.length + effectiveTeamMembers.length
+      if (migrationScope.resources) totalOps += data.resources.length
       if (migrationScope.tasks) totalOps += importTasks.length
       if (migrationScope.dependencies) totalOps += importDependencies.length
       if (migrationScope.assignments) totalOps += importAssignments.length
       setTotal(totalOps)
 
       // Phase 1: Resources (sequential, before parallel project loop)
-      setPhase('Resources')
-      appendLog(`Matching/importing ${data.resources.length} resources`)
-      const resourceResults = await writeResources(data.resources, buildEffectiveResourceOptions(data.resources, systemUsers, resourceOptions), r => {
-        setCompleted(c => c + 1)
-        appendLog(`${r.success ? 'OK' : 'SKIP'} resource ${r.poResourceUid}${r.error ? `: ${r.error.message}` : ''}`)
-      })
+      let resourceResults: Awaited<ReturnType<typeof writeResources>> = []
+      if (migrationScope.resources) {
+        setPhase('Resources')
+        appendLog(`Matching/importing ${data.resources.length} resources`)
+        resourceResults = await writeResources(data.resources, buildEffectiveResourceOptions(data.resources, systemUsers, resourceOptions), r => {
+          setCompleted(c => c + 1)
+          appendLog(`${r.success ? 'OK' : 'SKIP'} resource ${r.poResourceUid}${r.error ? `: ${r.error.message}` : ''}`)
+        })
+      } else {
+        appendLog('Resources skipped — outside migration scope')
+      }
       const resourceIdMap = Object.fromEntries(
         resourceResults.filter(r => r.success && r.dvBookableResourceId)
           .map(r => [r.poResourceUid, r.dvBookableResourceId as string])
@@ -615,6 +627,7 @@ export function Step4Import() {
                   },
                   projectTasks,
                   projectCalendar,
+                  { includeZeroWorkAssignments },
                 )
                 allAssignResults.push(...assignResults)
 
@@ -691,7 +704,9 @@ export function Step4Import() {
       )
 
       // Aggregate results for Step 5 report
-      addImportResult(makeResult('Resources', resourceResults.length, resourceResults.flatMap(r => r.error ? [r.error] : [])))
+      if (migrationScope.resources) {
+        addImportResult(makeResult('Resources', resourceResults.length, resourceResults.flatMap(r => r.error ? [r.error] : [])))
+      }
       addImportResult(makeResult('Projects', allProjectResults.length, allProjectResults.flatMap(r => r.error ? [r.error] : [])))
       const totalAssociations = allProjectResults.reduce((sum, r) => sum + (r.associationsCreated ?? 0), 0)
       if (totalAssociations > 0) {
@@ -701,7 +716,23 @@ export function Step4Import() {
       if (migrationScope.tasks) {
         addImportResult(makeResult('Tasks', allTaskResults.length, allTaskResults.flatMap(r => r.error ? [r.error] : [])))
         if (migrationScope.dependencies && allDepResults.length > 0) {
-          addImportResult(makeResult('Dependencies', allDepResults.length, allDepResults.flatMap(r => r.error ? [r.error] : [])))
+          const depErrors = allDepResults.flatMap(r => {
+            if (r.error) return [r.error]
+            if (!r.fallbackApplied) return []
+            const degraded = [
+              r.fallbackApplied !== 'withoutLag' ? `type ${r.dependencyType ?? '?'} written as FS` : null,
+              r.fallbackApplied !== 'asFs' ? 'source lag dropped' : null,
+            ].filter(Boolean).join('; ')
+            return [{
+              entity: 'Dependency',
+              sourceId: r.poDependencyId,
+              message: `Created with fallback (${degraded})${r.fallbackReason ? `: ${r.fallbackReason}` : ''}`,
+              timestamp: new Date().toISOString(),
+              errorClass: 'DependencyFallback',
+              projectId: r.projectId,
+            } satisfies ImportError]
+          })
+          addImportResult(makeResult('Dependencies', allDepResults.length, depErrors))
         }
         if (migrationScope.assignments && allAssignResults.length > 0) {
           addImportResult(makeResult('Assignments', allAssignResults.length, allAssignResults.flatMap(r => r.error ? [r.error] : [])))
@@ -1034,6 +1065,14 @@ export function Step4Import() {
           disabled={running}
           label="Include source dependency lag/slack"
           onChange={(_, d) => setIncludeDependencyLag(!!d.checked)}
+        />
+      )}
+      {migrationScope.assignments && (
+        <Checkbox
+          checked={includeZeroWorkAssignments}
+          disabled={running}
+          label="Include assignments with 0 work"
+          onChange={(_, d) => setIncludeZeroWorkAssignments(!!d.checked)}
         />
       )}
       </>

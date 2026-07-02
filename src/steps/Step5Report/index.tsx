@@ -133,6 +133,7 @@ const ERROR_CLASS_LABELS: Record<string, string> = {
   Throttled:           'API throttled',
   NonFSDependency:     'Non-FS dependency type (license limitation)',
   PredecessorMissing:  'Predecessor or successor task not imported',
+  DependencyFallback:  'Dependency created with degraded type/lag (fallback)',
   Other:               'Other error',
 }
 

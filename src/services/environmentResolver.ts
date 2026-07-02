@@ -95,6 +95,17 @@ function readStoredUrl(localStorageKey: string): string | null {
   const scoped = localStorage.getItem(localStorageKey)
   if (scoped?.trim()) return scoped
 
+  // The unscoped legacy key predates environment-scoped storage and may hold a
+  // URL saved in a DIFFERENT environment — validation only checks user access,
+  // not environment identity, so reading it here can silently point all writes
+  // at the wrong tenant. When the key is environment-scoped, ignore and remove
+  // the legacy value; it is only trusted when scoping itself failed (the passed
+  // key IS the legacy key) because there is no environment id to contradict it.
+  if (localStorageKey !== DATAVERSE_URL_LOCALSTORAGE_KEY) {
+    localStorage.removeItem(DATAVERSE_URL_LOCALSTORAGE_KEY)
+    return null
+  }
+
   const legacy = localStorage.getItem(DATAVERSE_URL_LOCALSTORAGE_KEY)
   return legacy?.trim() ? legacy : null
 }

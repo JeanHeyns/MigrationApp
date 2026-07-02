@@ -15,9 +15,18 @@ export async function fetchAssignments(siteUrl: string): Promise<PoAssignment[]>
   }
 }
 
-export async function fetchAssignmentsForProjects(siteUrl: string, projects: PoProject[]): Promise<PoAssignment[]> {
+export interface AssignmentFetchOptions {
+  /** When true, assignments with 0 source work are fetched too (no server or client work filter). */
+  includeZeroWork?: boolean
+}
+
+export async function fetchAssignmentsForProjects(
+  siteUrl: string,
+  projects: PoProject[],
+  options?: AssignmentFetchOptions,
+): Promise<PoAssignment[]> {
   const rows = await Promise.all(projects.map(project =>
-    fetchPositiveAssignmentsForProject(siteUrl, cleanGuid(project.ProjectId))
+    fetchAssignmentsForProject(siteUrl, cleanGuid(project.ProjectId), options?.includeZeroWork ?? false)
   ))
   return rows.flat()
 }
@@ -41,9 +50,19 @@ function cleanGuid(id: string): string {
   return id.replace(/[{}]/g, '').trim()
 }
 
-async function fetchPositiveAssignmentsForProject(siteUrl: string, projectId: string): Promise<PoAssignment[]> {
+async function fetchAssignmentsForProject(siteUrl: string, projectId: string, includeZeroWork: boolean): Promise<PoAssignment[]> {
   const guidProjectFilter = `ProjectId eq guid'${projectId}'`
   const stringProjectFilter = `ProjectId eq '${projectId}'`
+
+  if (includeZeroWork) {
+    return odataGetAll<PoAssignment>(
+      siteUrl,
+      assignmentUri(guidProjectFilter),
+    ).catch(() => odataGetAll<PoAssignment>(
+      siteUrl,
+      assignmentUri(stringProjectFilter),
+    ))
+  }
 
   try {
     return filterPositiveAssignments(await odataGetAll<PoAssignment>(
@@ -72,9 +91,15 @@ function assignmentUri(filter: string): string {
   return `_api/ProjectData/Assignments?$format=json&$filter=${filter}`
 }
 
+/**
+ * Client-side mirror of POSITIVE_ASSIGNMENT_WORK_FILTER: keep an assignment when
+ * EITHER work field is positive. Checking both fields matters — `Work ?? RemainingWork`
+ * would stop at Work=0 and drop rows the server filter deliberately keeps.
+ */
 function filterPositiveAssignments(assignments: PoAssignment[]): PoAssignment[] {
   return assignments.filter(assignment => {
-    const hours = workValueToHours(assignment.AssignmentWork ?? assignment.AssignmentRemainingWork)
-    return hours != null && hours > 0
+    const work = workValueToHours(assignment.AssignmentWork) ?? 0
+    const remaining = workValueToHours(assignment.AssignmentRemainingWork) ?? 0
+    return work > 0 || remaining > 0
   })
 }
